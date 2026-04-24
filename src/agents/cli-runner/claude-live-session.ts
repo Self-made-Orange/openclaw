@@ -141,23 +141,31 @@ export function buildClaudeLiveArgs(params: {
   systemPrompt: string;
   useResume: boolean;
 }): string[] {
+  // Claude Code CLI >=2.1.114 rejects `--output-format=stream-json` without
+  // `--verbose` ("Error: When using --print, --output-format=stream-json
+  // requires --verbose"). Live sessions always use stream-json I/O, so inject
+  // `--verbose` once at the end; `appendArg` is idempotent so it is a no-op
+  // when callers already pass it through backend.args.
   return appendArg(
-    upsertArgValue(
+    appendArg(
       upsertArgValue(
-        params.useResume
-          ? stripLiveProcessArgs(params.args, params.backend)
-          : appendSystemPromptArg(
-              stripLiveProcessArgs(params.args, params.backend),
-              params.backend,
-              params.systemPrompt,
-            ),
-        "--input-format",
-        "stream-json",
+        upsertArgValue(
+          params.useResume
+            ? stripLiveProcessArgs(params.args, params.backend)
+            : appendSystemPromptArg(
+                stripLiveProcessArgs(params.args, params.backend),
+                params.backend,
+                params.systemPrompt,
+              ),
+          "--input-format",
+          "stream-json",
+        ),
+        "--permission-prompt-tool",
+        "stdio",
       ),
-      "--permission-prompt-tool",
-      "stdio",
+      "--replay-user-messages",
     ),
-    "--replay-user-messages",
+    "--verbose",
   );
 }
 
