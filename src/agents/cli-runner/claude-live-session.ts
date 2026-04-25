@@ -141,23 +141,29 @@ export function buildClaudeLiveArgs(params: {
   systemPrompt: string;
   useResume: boolean;
 }): string[] {
+  // Claude Code CLI >=2.1.114 rejects --output-format=stream-json without --verbose
+  // ("When using --print, --output-format=stream-json requires --verbose").
+  // Live sessions always use stream-json I/O, so --verbose is required here.
   return appendArg(
-    upsertArgValue(
+    appendArg(
       upsertArgValue(
-        params.useResume
-          ? stripLiveProcessArgs(params.args, params.backend)
-          : appendSystemPromptArg(
-              stripLiveProcessArgs(params.args, params.backend),
-              params.backend,
-              params.systemPrompt,
-            ),
-        "--input-format",
-        "stream-json",
+        upsertArgValue(
+          params.useResume
+            ? stripLiveProcessArgs(params.args, params.backend)
+            : appendSystemPromptArg(
+                stripLiveProcessArgs(params.args, params.backend),
+                params.backend,
+                params.systemPrompt,
+              ),
+          "--input-format",
+          "stream-json",
+        ),
+        "--permission-prompt-tool",
+        "stdio",
       ),
-      "--permission-prompt-tool",
-      "stdio",
+      "--replay-user-messages",
     ),
-    "--replay-user-messages",
+    "--verbose",
   );
 }
 
@@ -296,8 +302,14 @@ function failTurn(session: ClaudeLiveSession, error: unknown): void {
     return;
   }
   const errorKind = error instanceof Error ? error.name : typeof error;
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const stderrTail = session.stderr.slice(-2000);
   cliBackendLog.warn(
     `claude live session turn failed: provider=${session.providerId} model=${session.modelId} durationMs=${Date.now() - turn.startedAtMs} error=${errorKind}`,
+  );
+  // CLAW-DEBUG: surface real failure detail so reason=unknown can be classified.
+  console.error(
+    `[claw-debug] failTurn provider=${session.providerId} errorKind=${errorKind} message=${JSON.stringify(errorMessage)} stderrTail=${JSON.stringify(stderrTail)}`,
   );
   clearTurnTimers(turn);
   turn.streamingParser.finish();

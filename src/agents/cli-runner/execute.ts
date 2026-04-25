@@ -189,9 +189,15 @@ export async function executePreparedCliRun(
     backend,
     cliSessionId: cliSessionIdToUse,
   });
-  const useResume = Boolean(
-    cliSessionIdToUse && resolvedSessionId && backend.resumeArgs && backend.resumeArgs.length > 0,
-  );
+  // CLAW-DEBUG: forcibly disable warm session resume — claude-code 2.1.114 rejects
+  // resume attempts with "No conversation found with session ID: <uuid>" because
+  // OpenClaw's remembered UUID no longer exists in claude's session store.
+  // Every turn now starts as a fresh session until upstream compatibility is fixed.
+  const useResume =
+    false &&
+    Boolean(
+      cliSessionIdToUse && resolvedSessionId && backend.resumeArgs && backend.resumeArgs.length > 0,
+    );
   const systemPromptArg = resolveSystemPromptUsage({
     backend,
     isNewSession: isNew,
