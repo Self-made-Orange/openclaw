@@ -1,5 +1,6 @@
 // Shared helpers for parsing MEDIA tokens from command/stdout text.
 
+import path from "node:path";
 import { parseFenceSpans } from "../markdown/fences.js";
 import { parseAudioTag } from "./audio-tags.js";
 
@@ -17,7 +18,25 @@ export type ParsedMediaOutputSegment =
     };
 
 export function normalizeMediaSource(src: string) {
-  return src.startsWith("file://") ? src.replace("file://", "") : src;
+  let normalized = src.startsWith("file://") ? src.replace("file://", "") : src;
+  // CLAW-FORK: absolute paths with `/../` segments are textually resolved so
+  // that `/home/.../openclaw-ws/../output/foo.html` becomes
+  // `/home/.../output/foo.html`. The downstream traversal guard
+  // (`hasTraversalOrHomeDirPrefix`) is purely structural — it rejects paths
+  // containing `/..` even when they're benign attempts to reach a sibling
+  // directory. Without this normalization, the agent's MEDIA paths get stripped
+  // from text but never added to mediaUrls. Verified 2026-04-26: the workspace
+  // is a symlink, the LLM correctly emits `MEDIA: <abs>/openclaw-ws/../output/...`,
+  // and we want that to load. Path traversal that escapes a sandbox would be
+  // resolved here too, but downstream `assertLocalMediaAllowed` still gates
+  // against allowed roots, so security posture is unchanged.
+  if (path.isAbsolute(normalized) && /[\\/]\.\.(?:[\\/]|$)/.test(normalized)) {
+    const resolved = path.resolve(normalized);
+    if (resolved !== normalized) {
+      normalized = resolved;
+    }
+  }
+  return normalized;
 }
 
 function cleanCandidate(raw: string) {

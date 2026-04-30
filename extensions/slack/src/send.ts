@@ -145,6 +145,14 @@ async function postSlackMessageBestEffort(params: {
 export type SlackSendResult = {
   messageId: string;
   channelId: string;
+  // CLAW-FORK: when mediaUrl was provided, this surfaces the uploaded file's
+  // Slack permalink (Slack-internal viewer, requires Slack login). Public-URL
+  // sharing via `files.sharedPublicURL` requires a user token (xoxp) which we
+  // don't have — see uploadSlackFile for details. Use this in combination with
+  // a localhost static-server URL to give users both fast direct rendering on
+  // the gateway machine and Slack-viewer fallback on remote devices.
+  filePermalink?: string;
+  fileId?: string;
 };
 
 function resolveToken(params: {
@@ -251,7 +259,7 @@ async function uploadSlackFile(params: {
   caption?: string;
   threadTs?: string;
   maxBytes?: number;
-}): Promise<string> {
+}): Promise<{ fileId: string; permalink?: string }> {
   const { buffer, contentType, fileName } = await loadOutboundMediaFromUrl(params.mediaUrl, {
     maxBytes: params.maxBytes,
     mediaAccess: params.mediaAccess,
@@ -304,7 +312,23 @@ async function uploadSlackFile(params: {
     throw new Error(`Failed to complete upload: ${completeResp.error ?? "unknown error"}`);
   }
 
-  return uploadUrlResp.file_id;
+  // CLAW-FORK: surface permalink so callers can post an explicit "open" button.
+  // We do NOT call `files.sharedPublicURL` — that endpoint requires a user token
+  // (xoxp), not the bot token (xoxb) we have. Calling it returns
+  // `not_allowed_token_type`, and worse, our previous implementation surfaced
+  // the API's stub `permalink_public` (which 404s when actually visited) as a
+  // working URL. The right approach is to fall back to `permalink` (Slack
+  // desktop/mobile viewer) for cross-device access; on the same machine the
+  // gateway runs on, the caller pairs `permalink` with the localhost static
+  // server URL for direct browser rendering.
+  const completedFile = (completeResp.files as Array<{ permalink?: string }> | undefined)?.[0];
+  return {
+    fileId: uploadUrlResp.file_id,
+    permalink:
+      typeof completedFile?.permalink === "string" && completedFile.permalink.startsWith("http")
+        ? completedFile.permalink
+        : undefined,
+  };
 }
 
 export async function sendMessageSlack(
@@ -380,9 +404,11 @@ export async function sendMessageSlack(
       : undefined;
 
   let lastMessageId = "";
+  let uploadedFileId: string | undefined;
+  let uploadedFilePermalink: string | undefined;
   if (opts.mediaUrl) {
     const [firstChunk, ...rest] = resolvedChunks;
-    lastMessageId = await uploadSlackFile({
+    const uploadResult = await uploadSlackFile({
       client,
       channelId,
       mediaUrl: opts.mediaUrl,
@@ -395,6 +421,9 @@ export async function sendMessageSlack(
       threadTs: opts.threadTs,
       maxBytes: mediaMaxBytes,
     });
+    lastMessageId = uploadResult.fileId;
+    uploadedFileId = uploadResult.fileId;
+    uploadedFilePermalink = uploadResult.permalink;
     for (const chunk of rest) {
       const response = await postSlackMessageBestEffort({
         client,
@@ -421,5 +450,7 @@ export async function sendMessageSlack(
   return {
     messageId: lastMessageId || "unknown",
     channelId,
+    ...(uploadedFileId ? { fileId: uploadedFileId } : {}),
+    ...(uploadedFilePermalink ? { filePermalink: uploadedFilePermalink } : {}),
   };
 }

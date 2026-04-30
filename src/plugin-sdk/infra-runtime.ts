@@ -50,6 +50,10 @@ export * from "../infra/fs-safe.ts";
 export * from "../infra/heartbeat-events.ts";
 export * from "../infra/heartbeat-summary.ts";
 export * from "../infra/heartbeat-visibility.ts";
+// CLAW-FORK: expose wake trigger so channel plugins (e.g. slack reaction handler)
+// can drain queued system events immediately instead of waiting for next user
+// message or empty-HEARTBEAT.md interval skip.
+export { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
 export * from "../infra/home-dir.js";
 export * from "../infra/http-body.js";
 export * from "../infra/json-files.js";

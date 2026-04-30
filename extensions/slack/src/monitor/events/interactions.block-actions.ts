@@ -729,6 +729,22 @@ async function handleSlackBlockAction(params: {
 }): Promise<void> {
   const { ack, body, action, respond } = params.args;
   await ack();
+  // CLAW-FORK: navigation buttons (open-in-browser etc) emit a `block_actions`
+  // event but their click already opened the URL client-side. The downstream
+  // handler replaces the actions block with a "✓ <label> selected by @user"
+  // context block (see updateSlackLegacyBlockAction), which destroys the
+  // button so it can't be re-clicked. We tag our nav buttons with action_id
+  // prefix `claw_open_browser:` and short-circuit here.
+  //
+  // We can't rely on `action.url` — Slack does NOT include the button's url
+  // field in the action payload it sends back (verified 2026-04-26).
+  // action_id is the only stable signal.
+  const actionIdRaw = (action as { action_id?: unknown })?.action_id;
+  const navActionId = typeof actionIdRaw === "string" ? actionIdRaw : "";
+  if (navActionId.startsWith("claw_open_browser")) {
+    params.ctx.runtime.log?.(`[claw-debug] block_action navigation skip: actionId=${navActionId}`);
+    return;
+  }
   if (params.ctx.shouldDropMismatchedSlackEvent?.(body)) {
     params.ctx.runtime.log?.("slack:interaction drop block action payload (mismatched app/team)");
     return;

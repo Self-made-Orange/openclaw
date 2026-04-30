@@ -36,6 +36,7 @@ import {
 import { formatElevatedUnavailableMessage, resolveElevatedPermissions } from "./reply-elevated.js";
 import { stripInlineStatus } from "./reply-inline.js";
 import { resolveRuntimePolicySessionKey } from "./runtime-policy-session-key.js";
+import { classifyMessageComplexity } from "./thinking-classifier.js";
 import type { TypingController } from "./typing.js";
 
 type AgentDefaults = NonNullable<OpenClawConfig["agents"]>["defaults"];
@@ -491,8 +492,20 @@ export async function resolveReplyDirectives(params: {
       });
   provider = modelState.provider;
   model = modelState.model;
+  // CLAW-FORK: per-message complexity classifier for moonshot/kimi-k2.x.
+  // Auto-escalate thinking-on for complex messages, leave default-off for simple ones.
+  // Slots between explicit user/session settings and the model's static default.
+  const classifierThinkLevel: ThinkLevel | undefined =
+    resolvedThinkLevel === undefined
+      ? (classifyMessageComplexity({
+          text: cleanedBody,
+          provider: provider ?? "",
+          model: model ?? "",
+        }) as ThinkLevel | undefined)
+      : undefined;
   const resolvedThinkLevelWithDefault =
     resolvedThinkLevel ??
+    classifierThinkLevel ??
     (await modelState.resolveDefaultThinkingLevel()) ??
     (agentCfg?.thinkingDefault as ThinkLevel | undefined);
 

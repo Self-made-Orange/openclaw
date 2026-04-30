@@ -483,6 +483,17 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       logVerbose("slack: suppressed duplicate normal delivery within the same turn");
       return;
     }
+    // CLAW-FORK: mark BEFORE await to close the race where two `deliver`
+    // callbacks fire back-to-back with identical content (observed when fence
+    // rescue produced clean blocks and both an intermediate streaming text and
+    // the final assistant text dispatched). Marking after deliverReplies
+    // completes leaves a 1~2s window where the second caller passes the
+    // hasDelivered check.
+    deliveryTracker.markDelivered({
+      kind: params.kind,
+      payload: params.payload,
+      threadTs: replyThreadTs,
+    });
     await deliverReplies({
       cfg: ctx.cfg,
       replies: [params.payload],
@@ -493,6 +504,8 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       textLimit: ctx.textLimit,
       replyThreadTs,
       replyToMode: prepared.replyToMode,
+      // CLAW-FORK: 채널 root 답변에 멘션 prefix 강제 (replies.ts applyMentionPrefix).
+      ...(message.user ? { senderId: message.user } : {}),
       ...(slackIdentity ? { identity: slackIdentity } : {}),
     });
     observedReplyDelivery = true;
@@ -501,11 +514,6 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       usedReplyThreadTs ??= replyThreadTs;
     }
     replyPlan.markSent();
-    deliveryTracker.markDelivered({
-      kind: params.kind,
-      payload: params.payload,
-      threadTs: replyThreadTs,
-    });
   };
 
   const deliverWithStreaming = async (params: {
@@ -745,6 +753,22 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
     onError: (err, info) => {
       runtime.error?.(danger(`slack ${info.kind} reply failed: ${formatErrorMessage(err)}`));
       replyPipeline.typingCallbacks?.onIdle?.();
+      // CLAW-FORK: silent delivery failures (e.g. invalid_blocks) leave the
+      // user staring at the typing indicator with nothing to show. Add a
+      // :x: reaction on the user's message so the failure is visible. Best
+      // effort — never throw out of onError.
+      const failTargetTs = messageTs;
+      if (failTargetTs) {
+        reactSlackMessage(message.channel, failTargetTs, "x", {
+          token: ctx.botToken,
+          client: ctx.app.client,
+        }).catch((reactionErr) => {
+          if (formatErrorMessage(reactionErr).includes("already_reacted")) return;
+          logVerbose(
+            `slack: failed to add :x: failure reaction (${formatErrorMessage(reactionErr)})`,
+          );
+        });
+      }
     },
   });
 
@@ -768,8 +792,13 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
     : undefined;
   let hasStreamedMessage = false;
   const streamMode = slackStreaming.draftMode;
+  // CLAW-FORK: tool progress messages (`Working… • tool: exec • ...`) are noise
+  // in chatbot UX. Default off; opt-in via account.config.streaming.preview.toolProgress=true
+  // (currently has to be set raw — schema doesn't expose the field yet).
+  // SOUL.md §"메타 narration 절대 금지" treats internal tool steps as exactly the kind of
+  // process-leak the user explicitly forbade.
   const previewToolProgressEnabled =
-    Boolean(draftStream) && resolveChannelStreamingPreviewToolProgress(account.config);
+    Boolean(draftStream) && resolveChannelStreamingPreviewToolProgress(account.config, false);
   let previewToolProgressSuppressed = false;
   let previewToolProgressLines: string[] = [];
   let appendRenderedText = "";
@@ -865,7 +894,10 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
             ? !resolveChannelStreamingBlockEnabled(account.config)
             : undefined,
         onModelSelected,
-        suppressDefaultToolProgressMessages: previewToolProgressEnabled ? true : undefined,
+        // CLAW-FORK: always suppress default tool progress delivery on Slack.
+        // Errors / media / exec-approval still pass through (dispatch-from-config gate).
+        // Pairs with previewToolProgressEnabled=false above for clean chatbot UX.
+        suppressDefaultToolProgressMessages: true,
         onPartialReply: useStreaming
           ? undefined
           : !previewStreamingEnabled
