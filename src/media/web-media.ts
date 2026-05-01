@@ -163,8 +163,13 @@ const HTML_SAFETY_DANGER_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> =
 // local pipeline (envelope.json → schema-validated → render.mjs) and not
 // from arbitrary agent text. Detected via the renderer's distinctive
 // `data-theme=` root attribute paired with the inline pan/zoom comment.
+//
+// 2026-04-30: agent-outprint-skills swap added 9 new themes (notion default,
+// linear/vercel/stripe/supabase/shadcn-light/shadcn-dark/silent-house/audi-f1).
+// Old 4-theme regex blocked all of them, killing media attachment + open-browser
+// button. Updated to match all 13 themes.
 const HYPERSCRIBE_HTML_SIGNATURE_RE =
-  /<html[^>]*\sdata-theme\s*=\s*["'](?:studio|midnight|void|gallery)["']/i;
+  /<html[^>]*\sdata-theme\s*=\s*["'](?:studio|midnight|void|gallery|notion|linear|vercel|stripe|supabase|shadcn-light|shadcn-dark|silent-house|audi-f1)["']/i;
 const HYPERSCRIBE_INTERACTIVE_LAYER_MARKER = "Hyperscribe interactive layer";
 
 function isHyperscribeRenderedHtml(text: string): boolean {
