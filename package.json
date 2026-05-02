@@ -913,6 +913,10 @@
       "types": "./dist/plugin-sdk/mattermost-policy.d.ts",
       "default": "./dist/plugin-sdk/mattermost-policy.js"
     },
+    "./plugin-sdk/memory": {
+      "types": "./dist/plugin-sdk/memory.d.ts",
+      "default": "./dist/plugin-sdk/memory.js"
+    },
     "./plugin-sdk/memory-core": {
       "types": "./dist/plugin-sdk/memory-core.d.ts",
       "default": "./dist/plugin-sdk/memory-core.js"

@@ -214,6 +214,7 @@
   "qa-runner-runtime",
   "mattermost",
   "mattermost-policy",
+  "memory",
   "memory-core",
   "memory-core-engine-runtime",
   "memory-core-host-engine-embeddings",

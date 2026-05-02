@@ -1,0 +1,273 @@
+---
+summary: Lock Phase 0 decisions (storage, SDK, frontmatter, sign-off) so Phase 1 can begin without ambiguity.
+title: Hermes hybrid self-improvement — Phase 0 alignment
+read_when:
+  - Reviewing or signing off on the Hermes hybrid self-improvement proposal
+  - About to start Phase 1 (open-prose-memory plugin) and need the locked contract
+  - Touching `~/.openclaw/memory/` layout, plugin SDK memory hooks, or pattern frontmatter for memory/evolve flags
+---
+
+## Status
+
+`LOCKED` — solo-dev sign-off recorded 2026-05-02 by `Self-made-Orange`. Phase 1
+(`extensions/open-prose-memory/` scaffold) authorized to begin.
+
+## Purpose
+
+Resolve the four open contracts from `hermes-hybrid-self-improvement.md` Phase 0 so the
+plugin work in Phase 1 (`open-prose-memory`) can be implemented against a stable target.
+
+Each decision is laid out with: proposal, rationale, alternatives considered, status.
+Edit the status to `LOCKED` (or `REVISED` with notes) to sign off.
+
+## Decision 1 — On-disk state layout
+
+### Proposal
+
+```
+~/.openclaw/memory/
+  <agentId>/
+    sessions.db          # SQLite, FTS5 virtual table over compacted session summaries
+    user.md              # append-only observed user preferences (bullet list, see Decision 1 schema)
+    memory.md            # append-only durable facts surfaced by patterns
+    traces/              # Phase 2 dependency, created lazily
+      <pattern-id>/
+        <session-id>.jsonl
+```
+
+### Retention and rotation
+
+- `sessions.db` — indefinite, soft cap **1 GB per agentId**. When breached, drop oldest
+  rows by `last_recall_ts` (LRU). Configurable via `memory.sessionsDbCapMB`.
+- `user.md`, `memory.md` — append-only, no rotation. Files are bounded by usage volume,
+  not policy.
+- `traces/` — default **30-day TTL** per file. Configurable globally via
+  `memory.tracesRetentionDays`. Per-pattern override through frontmatter
+  (`evolve.traceRetentionDays`). Rationale: most Phase 2 skill proposals fire on
+  recent traces; longer retention is mostly disk pressure with marginal recall gain
+  in solo-dev usage.
+
+### Redaction
+
+Split policy — bearer tokens always scrubbed (cheap, prevents catastrophic leakage),
+PII (email/phone/CC) opt-in only.
+
+- **Bearer token scrub: ALWAYS ON.** Pre-commit regex pass strips `xox[bp]-…`,
+  `sk-…`, `ghp_…`, `ntn_…`, `xapp-…`, `glpat-…` matches before any persistence path.
+  No config flag — leaking a token has unbounded blast radius and the recall cost is
+  near zero (tokens are noise, not signal).
+- **PII scrub (email, phone E.164/common locale, Luhn-validated CC): OFF by default.**
+  Opt-in via `memory.redactPII: true` in agent config. Recall quality outweighs PII
+  leakage risk for solo-dev personal vault use; flip on when sharing exports or
+  running on multi-tenant data.
+- Both passes are irreversible — original transcript is not retained when a scrub
+  hits.
+
+### Export and ownership
+
+- CLI: `openclaw memory export <agentId> --out <path>` produces a tarball with
+  `sessions.db` + `*.md` + `traces/`.
+- CLI: `openclaw memory clear <agentId>` removes the entire `<agentId>/` directory after
+  interactive confirmation. `--yes` for scripted cleanup.
+- File ownership is the OS user that ran the agent. No multi-user permission model in
+  scope.
+
+### Alternatives considered
+
+- **Single shared `sessions.db` for all agentIds** — rejected. Cross-agent leakage risk
+  and harder export/clear semantics outweigh the modest dedupe gain.
+- **JSONL only, no SQLite** — rejected. FTS5 is the cheapest hybrid lexical/semantic
+  recall available without pulling in a vector DB dependency.
+- **Vector store (sqlite-vss / pgvector / qdrant)** — deferred to Phase 3+ if FTS5 recall
+  proves insufficient. Adds binary deps the default install must avoid.
+
+### Status
+
+`LOCKED` 2026-05-02 by `Self-made-Orange`.
+
+## Decision 2 — Plugin SDK additions
+
+### Proposal
+
+Two additions under `openclaw/plugin-sdk/memory`:
+
+```ts
+// Lifecycle hook — called after every pattern completes (success or failure).
+// Plugins implement this to capture traces, write summaries, etc.
+export interface OnPatternCompleteHook {
+  (trace: PatternTrace): Promise<void>;
+}
+
+export interface PatternTrace {
+  agentId: string;
+  patternId: string;
+  sessionId: string;
+  startedAt: string; // ISO 8601 UTC
+  endedAt: string;
+  outcome: "success" | "failure" | "abort";
+  toolCalls: ToolCallSummary[]; // length, identity, error/retry counts
+  tokenUsage: { input: number; output: number; cacheHit: number };
+  promptHash: string; // SHA-256 of final prompt (for dedupe)
+  errorMessage?: string; // present iff outcome !== "success"
+  patternFlags: { memory?: "cross-session"; evolve?: boolean };
+}
+
+// Runtime helper — called from inside a pattern body to fetch ranked recall.
+// Returns [] for patterns without `memory: cross-session`.
+export interface RecallHelper {
+  (query: string, opts?: RecallOptions): Promise<RecallResult[]>;
+}
+
+export interface RecallOptions {
+  k?: number; // default 5
+  agentId?: string; // default = current agent
+  minScore?: number; // FTS5 bm25 threshold, default 0
+}
+
+export interface RecallResult {
+  sessionId: string;
+  summary: string;
+  score: number;
+  ts: string;
+}
+```
+
+### Versioning
+
+- This is a net-add. Existing SDK consumers see no breaking change.
+- Bump SDK **minor** version (current `0.X.Y` → `0.(X+1).0`).
+- Generate baseline diff via `pnpm plugin-sdk:api:gen`. Verify no incidental break via
+  `pnpm plugin-sdk:api:check`.
+- Document the additions in `openclaw/plugin-sdk/CHANGELOG.md` with a "since 0.(X+1).0"
+  marker on the new types.
+
+### Hook registration
+
+- Plugins register `onPatternComplete` via the existing plugin manifest's lifecycle
+  section — no new manifest field required.
+- Multiple plugins may register; runtime invokes them sequentially in registration order
+  with a per-hook **10s timeout**. Hook failures are logged and do not propagate.
+  Hooks that need longer (e.g., summarizer LLM calls) MUST queue to a background
+  worker rather than block in the hook body — keeps shutdown fast and surfaces hangs
+  early.
+
+### Alternatives considered
+
+- **Synchronous hook** — rejected. Persistent storage writes (SQLite, summarizer LLM
+  call) must not block the pattern's completion path.
+- **Event bus / pub-sub** — rejected. Adds runtime indirection; the typed hook is a
+  better fit for OpenClaw's plugin SDK style.
+
+### Status
+
+`LOCKED` 2026-05-02 by `Self-made-Orange`.
+
+## Decision 3 — Pattern frontmatter schema
+
+### Proposal
+
+Add two new optional top-level keys to the existing pattern frontmatter:
+
+```yaml
+memory: cross-session   # enum: "off" (default) | "cross-session"
+evolve: true            # bool: false (default) | true
+evolve:                 # OR: object form, when overrides needed
+  enabled: true
+  trigger:
+    toolCalls: 5        # default 5
+    retryCount: 2       # default 2
+  traceRetentionDays: 30  # overrides global default
+```
+
+### Default behavior preserved
+
+- A pattern without these keys runs **identically to today**. No recall, no trace
+  capture, no skill proposal. This is the central opt-in guarantee from the proposal.
+
+### Validation
+
+- Schema enforced by `pnpm config:docs:check` against the existing pattern frontmatter
+  schema (extend `extensions/open-prose/skills/prose/guidance/patterns.md` with the new
+  fields).
+- Unknown values fail loudly at pattern load time (consistent with existing strict
+  frontmatter handling).
+
+### Alternatives considered
+
+- **Single `selfImprove: true` umbrella flag** — rejected. Couples memory and evolve;
+  pattern authors may want one without the other (e.g., recall without auto-skill
+  proposals).
+- **Separate sidecar config file** — rejected. Frontmatter co-locates intent with the
+  pattern, matching existing `max:` counter conventions.
+
+### Status
+
+`LOCKED` 2026-05-02 by `Self-made-Orange`.
+
+## Decision 4 — Sign-off (solo dev)
+
+This fork has no separate CODEOWNERS team. The repository maintainer is the sole
+approver. Sign-off below authorizes Phase 1 to begin.
+
+| Decision                | Status   | Approved by        | Date       | Notes                                                    |
+| ----------------------- | -------- | ------------------ | ---------- | -------------------------------------------------------- |
+| 1. On-disk state layout | `LOCKED` | `Self-made-Orange` | 2026-05-02 | Trace TTL 30d; bearer scrub always; PII scrub opt-in     |
+| 2. Plugin SDK additions | `LOCKED` | `Self-made-Orange` | 2026-05-02 | Hook timeout 10s; long work goes to background worker    |
+| 3. Frontmatter schema   | `LOCKED` | `Self-made-Orange` | 2026-05-02 | `memory: cross-session` + `evolve` (bool or object form) |
+
+## Open questions — resolved 2026-05-02
+
+1. **Redaction default** → SPLIT. Bearer tokens always scrubbed (no flag). PII
+   (email/phone/CC) opt-in via `memory.redactPII: true`. Reflected in Decision 1's
+   Redaction section.
+2. **Trace retention** → 30 days (was 90). Reflected in Decision 1's Retention section.
+3. **SDK hook timeout** → 10s (was 30s). Long work MUST queue to background worker
+   rather than block in hook body. Reflected in Decision 2's Hook registration section.
+4. **`agentId` namespace** → KEEP. Forward-compat insurance is near-zero cost; later
+   migration would cost more than carrying the directory level today.
+5. **agentskills.io interop** → DEFERRED for Phase 2 v1. Phase 2 emits OpenClaw-native
+   `SKILL.md` aligned with the plugin SDK conventions. agentskills.io translator
+   added later if/when the user actually runs Hermes alongside OpenClaw. Avoids YAGNI
+   coupling.
+
+## Cross-check against Nous Research's Hermes (v0.12.0)
+
+Verified against the Hermes repo and docs after the proposal landed. Adjustments to
+the proposal's claims:
+
+- **GEPA + draft-PR gating is OUR design, not Hermes'.** The proposal frames "GEPA
+  evolution gated by human PR review" as a Hermes mechanism. Hermes actually mutates
+  skills in place via its `skill_manage` tool (`patch` / `edit` / `delete`) with no
+  draft-PR step. Our Phase 3 keeps the human-PR gate as a deliberate departure from
+  Hermes' default — worth calling out so future readers understand the safety
+  posture is ours.
+- **Trigger heuristics differ.** Hermes' documented trigger is "5+ tool calls on a
+  complex task, success or recovery, or user correction of approach." It does not
+  expose a `retry_count` threshold. Our `retryCount: 2` is an OpenClaw-specific
+  addition. Keep it for OpenProse fit, but document it as ours.
+- **No public Hermes "phase 1-4" scope exists.** The proposal references "Hermes
+  phase 4 / Darwinian Evolver" as out of scope. Public Hermes docs have no such
+  numbered roadmap; the term likely came from upstream research/dev notes not in
+  the public README. Treat this proposal's phase numbering as OpenClaw-internal.
+- **"Honcho-lite" framing dropped.** Honcho (`plastic-labs/honcho`) is a managed
+  service backed by PostgreSQL + pgvector + background derivation workers — not a
+  file format that can be subset cleanly. `user.md` here is just an append-only
+  bullet list of observed preferences with timestamps and source session ids;
+  calling it "Honcho-style" overclaimed inheritance. Removed from Decision 1's
+  comment.
+- **Skill storage divergence intentional.** Hermes uses `~/.hermes/skills/`. We use
+  `~/.openclaw/memory/<agentId>/` for memory state and would put any proposed
+  skills in `extensions/open-prose/skills/.../proposed/` so they go through normal
+  PR review. This is correct given the no-auto-merge rule.
+
+## Once locked
+
+When all three "Decision N" blocks read `LOCKED`, Phase 1 work begins:
+
+- New plugin scaffold at `extensions/open-prose-memory/` (manifest, SKILL.md, src/, test/).
+- SDK addition committed under `openclaw/plugin-sdk/memory.ts` (new file) with `since`
+  markers.
+- Frontmatter schema doc updated in
+  `extensions/open-prose/skills/prose/guidance/patterns.md`.
+- One PoC pattern in `extensions/open-prose/skills/prose/examples/` toggles
+  `memory: cross-session` for the integration smoke test.
