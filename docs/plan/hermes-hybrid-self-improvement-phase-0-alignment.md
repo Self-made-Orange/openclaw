@@ -9,9 +9,8 @@ read_when:
 
 ## Status
 
-Draft alignment. Awaiting solo-dev sign-off (this fork has no separate CODEOWNERS team —
-the maintainer is the sole approver). Phase 1 must not start until each "Decision" block
-below is marked `LOCKED`.
+`LOCKED` — solo-dev sign-off recorded 2026-05-02 by `Self-made-Orange`. Phase 1
+(`extensions/open-prose-memory/` scaffold) authorized to begin.
 
 ## Purpose
 
@@ -42,18 +41,27 @@ Edit the status to `LOCKED` (or `REVISED` with notes) to sign off.
   rows by `last_recall_ts` (LRU). Configurable via `memory.sessionsDbCapMB`.
 - `user.md`, `memory.md` — append-only, no rotation. Files are bounded by usage volume,
   not policy.
-- `traces/` — default **90-day TTL** per file. Configurable globally via
+- `traces/` — default **30-day TTL** per file. Configurable globally via
   `memory.tracesRetentionDays`. Per-pattern override through frontmatter
-  (`evolve.traceRetentionDays`).
+  (`evolve.traceRetentionDays`). Rationale: most Phase 2 skill proposals fire on
+  recent traces; longer retention is mostly disk pressure with marginal recall gain
+  in solo-dev usage.
 
 ### Redaction
 
-- **Default: off** — unredacted persistence preserves recall quality.
-- Opt-in scrub via `memory.redact: true` in agent config. When enabled, applies the
-  following regex passes pre-commit: email, phone (E.164 + common locale formats),
-  credit-card (Luhn-validated 13–19 digit), bearer tokens (`xox[bp]-…`, `sk-…`,
-  `ghp_…`, `ntn_…`).
-- Redaction is irreversible. Original transcript is not retained when scrub is on.
+Split policy — bearer tokens always scrubbed (cheap, prevents catastrophic leakage),
+PII (email/phone/CC) opt-in only.
+
+- **Bearer token scrub: ALWAYS ON.** Pre-commit regex pass strips `xox[bp]-…`,
+  `sk-…`, `ghp_…`, `ntn_…`, `xapp-…`, `glpat-…` matches before any persistence path.
+  No config flag — leaking a token has unbounded blast radius and the recall cost is
+  near zero (tokens are noise, not signal).
+- **PII scrub (email, phone E.164/common locale, Luhn-validated CC): OFF by default.**
+  Opt-in via `memory.redactPII: true` in agent config. Recall quality outweighs PII
+  leakage risk for solo-dev personal vault use; flip on when sharing exports or
+  running on multi-tenant data.
+- Both passes are irreversible — original transcript is not retained when a scrub
+  hits.
 
 ### Export and ownership
 
@@ -75,7 +83,7 @@ Edit the status to `LOCKED` (or `REVISED` with notes) to sign off.
 
 ### Status
 
-`PENDING` — awaiting sign-off.
+`LOCKED` 2026-05-02 by `Self-made-Orange`.
 
 ## Decision 2 — Plugin SDK additions
 
@@ -138,7 +146,10 @@ export interface RecallResult {
 - Plugins register `onPatternComplete` via the existing plugin manifest's lifecycle
   section — no new manifest field required.
 - Multiple plugins may register; runtime invokes them sequentially in registration order
-  with a per-hook 30s timeout. Hook failures are logged and do not propagate.
+  with a per-hook **10s timeout**. Hook failures are logged and do not propagate.
+  Hooks that need longer (e.g., summarizer LLM calls) MUST queue to a background
+  worker rather than block in the hook body — keeps shutdown fast and surfaces hangs
+  early.
 
 ### Alternatives considered
 
@@ -149,7 +160,7 @@ export interface RecallResult {
 
 ### Status
 
-`PENDING` — awaiting sign-off.
+`LOCKED` 2026-05-02 by `Self-made-Orange`.
 
 ## Decision 3 — Pattern frontmatter schema
 
@@ -191,36 +202,33 @@ evolve:                 # OR: object form, when overrides needed
 
 ### Status
 
-`PENDING` — awaiting sign-off.
+`LOCKED` 2026-05-02 by `Self-made-Orange`.
 
 ## Decision 4 — Sign-off (solo dev)
 
 This fork has no separate CODEOWNERS team. The repository maintainer is the sole
 approver. Sign-off below authorizes Phase 1 to begin.
 
-| Decision                | Status    | Approved by | Date | Notes |
-| ----------------------- | --------- | ----------- | ---- | ----- |
-| 1. On-disk state layout | `PENDING` | —           | —    | —     |
-| 2. Plugin SDK additions | `PENDING` | —           | —    | —     |
-| 3. Frontmatter schema   | `PENDING` | —           | —    | —     |
+| Decision                | Status   | Approved by        | Date       | Notes                                                    |
+| ----------------------- | -------- | ------------------ | ---------- | -------------------------------------------------------- |
+| 1. On-disk state layout | `LOCKED` | `Self-made-Orange` | 2026-05-02 | Trace TTL 30d; bearer scrub always; PII scrub opt-in     |
+| 2. Plugin SDK additions | `LOCKED` | `Self-made-Orange` | 2026-05-02 | Hook timeout 10s; long work goes to background worker    |
+| 3. Frontmatter schema   | `LOCKED` | `Self-made-Orange` | 2026-05-02 | `memory: cross-session` + `evolve` (bool or object form) |
 
-## Open questions to resolve at sign-off
+## Open questions — resolved 2026-05-02
 
-1. **Redaction default** — current proposal is OFF. Confirm or flip. If flipping ON by
-   default, list any pattern that would lose recall quality unacceptably.
-2. **Trace retention** — 90 days global default. Acceptable, or shorter (e.g., 30) to
-   minimize disk footprint?
-3. **SDK hook timeout** — 30 seconds per hook. Acceptable, or tighter (10s) to keep
-   shutdown fast even when a hook hangs?
-4. **`agentId` namespace** — singular per-OS-user agent today, but the path layout
-   already keys by `<agentId>` to allow future multi-agent isolation. Confirm this is
-   desired forward-compat or collapse to a flat layout for now.
-5. **agentskills.io interop** — Hermes (Nous Research) v0.12.0 stores skills at
-   `~/.hermes/skills/<category>/` with a YAML-frontmatter format compatible with the
-   open `agentskills.io` standard (sections: When to Use / Procedure / Pitfalls /
-   Verification). Should Phase 2's skill proposer emit the same format so proposed
-   skills are portable to Hermes and other agentskills.io consumers? If yes, our
-   `SKILL.md` schema for Phase 2 needs to align.
+1. **Redaction default** → SPLIT. Bearer tokens always scrubbed (no flag). PII
+   (email/phone/CC) opt-in via `memory.redactPII: true`. Reflected in Decision 1's
+   Redaction section.
+2. **Trace retention** → 30 days (was 90). Reflected in Decision 1's Retention section.
+3. **SDK hook timeout** → 10s (was 30s). Long work MUST queue to background worker
+   rather than block in hook body. Reflected in Decision 2's Hook registration section.
+4. **`agentId` namespace** → KEEP. Forward-compat insurance is near-zero cost; later
+   migration would cost more than carrying the directory level today.
+5. **agentskills.io interop** → DEFERRED for Phase 2 v1. Phase 2 emits OpenClaw-native
+   `SKILL.md` aligned with the plugin SDK conventions. agentskills.io translator
+   added later if/when the user actually runs Hermes alongside OpenClaw. Avoids YAGNI
+   coupling.
 
 ## Cross-check against Nous Research's Hermes (v0.12.0)
 
