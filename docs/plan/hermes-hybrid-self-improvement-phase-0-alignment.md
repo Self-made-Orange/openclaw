@@ -29,7 +29,7 @@ Edit the status to `LOCKED` (or `REVISED` with notes) to sign off.
 ~/.openclaw/memory/
   <agentId>/
     sessions.db          # SQLite, FTS5 virtual table over compacted session summaries
-    user.md              # append-only observed user preferences (Honcho-lite bullet list)
+    user.md              # append-only observed user preferences (bullet list, see Decision 1 schema)
     memory.md            # append-only durable facts surfaced by patterns
     traces/              # Phase 2 dependency, created lazily
       <pattern-id>/
@@ -215,6 +215,42 @@ approver. Sign-off below authorizes Phase 1 to begin.
 4. **`agentId` namespace** — singular per-OS-user agent today, but the path layout
    already keys by `<agentId>` to allow future multi-agent isolation. Confirm this is
    desired forward-compat or collapse to a flat layout for now.
+5. **agentskills.io interop** — Hermes (Nous Research) v0.12.0 stores skills at
+   `~/.hermes/skills/<category>/` with a YAML-frontmatter format compatible with the
+   open `agentskills.io` standard (sections: When to Use / Procedure / Pitfalls /
+   Verification). Should Phase 2's skill proposer emit the same format so proposed
+   skills are portable to Hermes and other agentskills.io consumers? If yes, our
+   `SKILL.md` schema for Phase 2 needs to align.
+
+## Cross-check against Nous Research's Hermes (v0.12.0)
+
+Verified against the Hermes repo and docs after the proposal landed. Adjustments to
+the proposal's claims:
+
+- **GEPA + draft-PR gating is OUR design, not Hermes'.** The proposal frames "GEPA
+  evolution gated by human PR review" as a Hermes mechanism. Hermes actually mutates
+  skills in place via its `skill_manage` tool (`patch` / `edit` / `delete`) with no
+  draft-PR step. Our Phase 3 keeps the human-PR gate as a deliberate departure from
+  Hermes' default — worth calling out so future readers understand the safety
+  posture is ours.
+- **Trigger heuristics differ.** Hermes' documented trigger is "5+ tool calls on a
+  complex task, success or recovery, or user correction of approach." It does not
+  expose a `retry_count` threshold. Our `retryCount: 2` is an OpenClaw-specific
+  addition. Keep it for OpenProse fit, but document it as ours.
+- **No public Hermes "phase 1-4" scope exists.** The proposal references "Hermes
+  phase 4 / Darwinian Evolver" as out of scope. Public Hermes docs have no such
+  numbered roadmap; the term likely came from upstream research/dev notes not in
+  the public README. Treat this proposal's phase numbering as OpenClaw-internal.
+- **"Honcho-lite" framing dropped.** Honcho (`plastic-labs/honcho`) is a managed
+  service backed by PostgreSQL + pgvector + background derivation workers — not a
+  file format that can be subset cleanly. `user.md` here is just an append-only
+  bullet list of observed preferences with timestamps and source session ids;
+  calling it "Honcho-style" overclaimed inheritance. Removed from Decision 1's
+  comment.
+- **Skill storage divergence intentional.** Hermes uses `~/.hermes/skills/`. We use
+  `~/.openclaw/memory/<agentId>/` for memory state and would put any proposed
+  skills in `extensions/open-prose/skills/.../proposed/` so they go through normal
+  PR review. This is correct given the no-auto-merge rule.
 
 ## Once locked
 
