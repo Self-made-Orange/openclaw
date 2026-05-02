@@ -5,9 +5,12 @@ memory recall for OpenProse patterns that opt in via frontmatter.
 
 ## Status
 
-**Scaffold.** Directory structure, plugin SDK memory hooks, redaction, and
-markdown writers are landed. SQLite + FTS5 sessions store and the Sonnet
-summarizer adapter ship in follow-up commits on `feat/hermes-self-improve`.
+**Phase 1 v1 — runtime-wired.** SDK memory hook types, redaction, markdown
+writers, SQLite + FTS5 sessions store, and the `agent_end` hook subscription
+are landed. Per-pattern frontmatter gating (`memory: cross-session`) is the
+remaining v2 work; today every completed agent turn is summarized and persisted
+when the plugin is `enabled`. Sonnet summarizer adapter and recall injection
+into pattern bodies follow in subsequent commits on `feat/hermes-self-improve`.
 
 See [docs/plan/hermes-hybrid-self-improvement.md](../../docs/plan/hermes-hybrid-self-improvement.md)
 for the design and
