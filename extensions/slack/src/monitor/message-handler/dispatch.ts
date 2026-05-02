@@ -54,6 +54,8 @@ import {
   resolveSlackThreadTs,
 } from "../replies.js";
 import { createReplyDispatcherWithTyping, dispatchInboundMessage } from "../reply.runtime.js";
+// CLAW-FORK 2026-04-30: RLHF Stage 2 — feedback buttons follow-up.
+import { postFeedbackButtonsInThread, shouldPostFeedbackButtons } from "./feedback-followup.js";
 import { finalizeSlackPreviewEdit } from "./preview-finalize.js";
 import type { PreparedSlackMessage } from "./types.js";
 
@@ -514,6 +516,18 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       usedReplyThreadTs ??= replyThreadTs;
     }
     replyPlan.markSent();
+    // CLAW-FORK 2026-04-30: RLHF Stage 2 — post 👍/👎 follow-up in thread.
+    // Skipped for short / yes-no / error replies (see shouldPostFeedbackButtons).
+    // prepared.replyTarget is "channel:CXXX" form; Slack chat.postMessage needs raw "CXXX".
+    if (replyThreadTs && shouldPostFeedbackButtons(params.payload)) {
+      const rawChannelId = message.channel ?? prepared.replyTarget.replace(/^channel:/, "");
+      void postFeedbackButtonsInThread({
+        token: ctx.botToken,
+        channelId: rawChannelId,
+        threadTs: replyThreadTs,
+        log: runtime.log,
+      });
+    }
   };
 
   const deliverWithStreaming = async (params: {

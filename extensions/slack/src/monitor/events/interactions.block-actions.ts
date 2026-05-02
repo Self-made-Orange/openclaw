@@ -4,6 +4,9 @@ import { enqueueSystemEvent } from "openclaw/plugin-sdk/infra-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
 import { dispatchSlackPluginInteractiveHandler } from "../../interactive-dispatch.js";
 import {
+  SLACK_FEEDBACK_BAD_ACTION_ID,
+  SLACK_FEEDBACK_GOOD_ACTION_ID,
+  SLACK_FEEDBACK_UNDO_ACTION_ID,
   SLACK_REPLY_BUTTON_ACTION_ID,
   SLACK_REPLY_SELECT_ACTION_ID,
 } from "../../reply-action-ids.js";
@@ -14,6 +17,10 @@ import {
   parsePluginBindingApprovalCustomId,
   resolvePluginConversationBindingApproval,
 } from "../conversation.runtime.js";
+import {
+  handleFeedbackButtonClick,
+  handleFeedbackUndoClick,
+} from "../message-handler/feedback-followup.js";
 import { escapeSlackMrkdwn } from "../mrkdwn.js";
 
 type InteractionMessageBlock = {
@@ -743,6 +750,28 @@ async function handleSlackBlockAction(params: {
   const navActionId = typeof actionIdRaw === "string" ? actionIdRaw : "";
   if (navActionId.startsWith("claw_open_browser")) {
     params.ctx.runtime.log?.(`[claw-debug] block_action navigation skip: actionId=${navActionId}`);
+    return;
+  }
+  // CLAW-FORK 2026-04-30: RLHF Stage 2 — feedback button click handler.
+  // Short-circuits before plugin interaction dispatch so feedback clicks
+  // never trigger an LLM run.
+  if (
+    navActionId === SLACK_FEEDBACK_GOOD_ACTION_ID ||
+    navActionId === SLACK_FEEDBACK_BAD_ACTION_ID
+  ) {
+    await handleFeedbackButtonClick({
+      args: params.args,
+      actionId: navActionId,
+      log: params.ctx.runtime.log,
+    });
+    return;
+  }
+  // CLAW-FORK 2026-04-30: feedback undo (accidental click rollback).
+  if (navActionId === SLACK_FEEDBACK_UNDO_ACTION_ID) {
+    await handleFeedbackUndoClick({
+      args: params.args,
+      log: params.ctx.runtime.log,
+    });
     return;
   }
   if (params.ctx.shouldDropMismatchedSlackEvent?.(body)) {
