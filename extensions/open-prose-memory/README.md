@@ -19,10 +19,46 @@ for the locked Phase 0 contracts that govern this plugin.
 
 ## Activation
 
+Two layers of opt-in.
+
+### 1. Plugin enable (agent config)
+
+Bundled plugins default to **disabled** in OpenClaw. Add this to
+`~/.openclaw/openclaw.json` to turn the plugin on:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "open-prose-memory": { "enabled": true }
+    }
+  }
+}
+```
+
+After editing, restart the gateway: `systemctl --user restart openclaw-gateway.service`.
+
+### 2. Per-pattern recall (frontmatter)
+
 A pattern receives recall results only when its frontmatter declares:
 
 ```yaml
 memory: cross-session
+```
+
+(Phase 1 v2 — runtime hook context plumbing for frontmatter pending. Today
+all completed turns are persisted regardless of pattern frontmatter.)
+
+## Build requirement
+
+This plugin lives at `extensions/open-prose-memory/` (TypeScript source) and
+compiles into `dist/extensions/open-prose-memory/` via `tsdown`. The runtime
+loader scans `dist/extensions/`, not the source dir, so any change to the
+plugin requires:
+
+```sh
+node scripts/tsdown-build.mjs
+systemctl --user restart openclaw-gateway.service
 ```
 
 Patterns without this flag run unchanged — no recall, no DB writes, no
