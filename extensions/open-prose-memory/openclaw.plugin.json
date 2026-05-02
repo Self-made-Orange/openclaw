@@ -1,0 +1,55 @@
+{
+  "id": "open-prose-memory",
+  "name": "OpenProse Memory",
+  "description": "Cross-session memory recall for opt-in OpenProse patterns. SQLite + FTS5 over compacted session summaries; activation gated by pattern frontmatter `memory: cross-session`.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "sessionsDbCapMB": {
+        "type": "integer",
+        "minimum": 64,
+        "maximum": 16384
+      },
+      "tracesRetentionDays": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 365
+      },
+      "redactPII": { "type": "boolean" },
+      "summarizerModel": { "type": "string" },
+      "recallDefaultK": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50
+      }
+    }
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Memory Recall",
+      "help": "Globally enable or pause cross-session recall. Patterns still need `memory: cross-session` in frontmatter to actually receive recall."
+    },
+    "sessionsDbCapMB": {
+      "label": "Sessions DB cap (MB)",
+      "help": "Soft cap per agentId. When breached, oldest rows by last_recall_ts are dropped. Default 1024."
+    },
+    "tracesRetentionDays": {
+      "label": "Trace retention (days)",
+      "help": "Default TTL for trace JSONL files under traces/. Default 30. Per-pattern override via frontmatter `evolve.traceRetentionDays`."
+    },
+    "redactPII": {
+      "label": "Redact PII (email/phone/CC)",
+      "help": "Off by default. Bearer tokens are always scrubbed regardless of this flag."
+    },
+    "summarizerModel": {
+      "label": "Summarizer model",
+      "help": "Provider/model used to compact session transcripts into searchable summaries. Defaults to the agent's primary model."
+    },
+    "recallDefaultK": {
+      "label": "Default recall k",
+      "help": "Top-k recall results returned when a pattern does not specify k. Default 5."
+    }
+  }
+}
