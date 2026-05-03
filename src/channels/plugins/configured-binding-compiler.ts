@@ -93,7 +93,16 @@ function compileConfiguredBindingRule(params: {
   bindingConversationId: string;
   provider: ChannelConfiguredBindingProvider;
 }): CompiledConfiguredBinding | null {
-  const agentId = pickFirstExistingAgentId(params.cfg, params.binding.agentId ?? "main");
+  // CLAW-FORK 2026-05-03 (Phase 2, multi-agent): AgentBinding union now
+  // includes AgentIntentBinding which has no `.agentId` (uses `router.agentId`
+  // for the classifier instead). Narrow defensively — intent bindings would
+  // delegate to their router agent here, but they're typically resolved
+  // upstream before reaching this compiler.
+  const directAgentId =
+    params.binding.type === "intent"
+      ? params.binding.router.agentId
+      : (params.binding.agentId ?? "main");
+  const agentId = pickFirstExistingAgentId(params.cfg, directAgentId);
   const consumer = resolveConfiguredBindingConsumer(params.binding);
   if (!consumer) {
     return null;

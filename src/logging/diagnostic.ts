@@ -184,6 +184,8 @@ export function logMessageQueued(params: {
   sessionKey?: string;
   channel?: string;
   source: string;
+  // CLAW-FORK 2026-05-03 (Phase 1, multi-agent): same rationale as logMessageProcessed.
+  agentId?: string;
 }) {
   if (!areDiagnosticsEnabledForProcess()) {
     return;
@@ -195,7 +197,7 @@ export function logMessageQueued(params: {
     diag.debug(
       `message queued: sessionId=${state.sessionId ?? "unknown"} sessionKey=${
         state.sessionKey ?? "unknown"
-      } source=${params.source} queueDepth=${state.queueDepth} sessionState=${state.state}`,
+      } agentId=${params.agentId ?? "unknown"} source=${params.source} queueDepth=${state.queueDepth} sessionState=${state.state}`,
     );
   }
   emitDiagnosticEvent({
@@ -215,6 +217,11 @@ export function logMessageProcessed(params: {
   chatId?: number | string;
   sessionId?: string;
   sessionKey?: string;
+  // CLAW-FORK 2026-05-03 (Phase 1, multi-agent): explicit agentId/matchedBy
+  // for grep-friendly debugging across multiple agents. agentId is also derivable
+  // from sessionKey but having it as its own field makes log filtering far easier.
+  agentId?: string;
+  matchedBy?: string;
   durationMs?: number;
   outcome: "completed" | "skipped" | "error";
   reason?: string;
@@ -229,7 +236,9 @@ export function logMessageProcessed(params: {
       params.chatId ?? "unknown"
     } messageId=${params.messageId ?? "unknown"} sessionId=${
       params.sessionId ?? "unknown"
-    } sessionKey=${params.sessionKey ?? "unknown"} outcome=${params.outcome} duration=${
+    } sessionKey=${params.sessionKey ?? "unknown"} agentId=${params.agentId ?? "unknown"}${
+      params.matchedBy ? ` matchedBy=${params.matchedBy}` : ""
+    } outcome=${params.outcome} duration=${
       params.durationMs ?? 0
     }ms${params.reason ? ` reason=${params.reason}` : ""}${
       params.error ? ` error="${params.error}"` : ""

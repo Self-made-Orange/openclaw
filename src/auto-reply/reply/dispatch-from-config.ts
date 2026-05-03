@@ -12,6 +12,7 @@ import {
 import { shouldSuppressLocalExecApprovalPrompt } from "../../channels/plugins/exec-approval-local.js";
 import { parseSessionThreadInfoFast } from "../../config/sessions/thread-info.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
+import { INTENT_PENDING_AGENT_ID } from "../../config/types.agents.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { fireAndForgetHook } from "../../hooks/fire-and-forget.js";
@@ -40,6 +41,10 @@ import {
   toPluginConversationBinding,
 } from "../../plugins/conversation-binding.js";
 import { getGlobalHookRunner, getGlobalPluginRegistry } from "../../plugins/hook-runner-global.js";
+// CLAW-FORK 2026-05-03 (Phase 1+2, multi-agent): for log enrichment +
+// intent-router sentinel resolution.
+import { findIntentBinding, resolveIntentAgent } from "../../routing/intent-router.js";
+import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
 import {
@@ -218,7 +223,55 @@ export async function dispatchReplyFromConfig(
   const channel = normalizeLowercaseStringOrEmpty(ctx.Surface ?? ctx.Provider ?? "unknown");
   const chatId = ctx.To ?? ctx.From;
   const messageId = ctx.MessageSid ?? ctx.MessageSidFirst ?? ctx.MessageSidLast;
-  const sessionKey = ctx.SessionKey;
+  // CLAW-FORK 2026-05-03 (Phase 2, multi-agent): sessionKey may carry the
+  // synthetic INTENT_PENDING_AGENT_ID sentinel emitted by `resolveAgentRoute`'s
+  // `binding.intent` tier. Detect it BEFORE any session-store / hook / log
+  // work so downstream sees the real agentId. The intent classifier runs
+  // async (cheap-model LLM call), then we rebuild the sessionKey by swapping
+  // the sentinel agentId for the resolved one.
+  let sessionKey = ctx.SessionKey;
+  if (sessionKey && sessionKey.includes(`agent:${INTENT_PENDING_AGENT_ID}:`)) {
+    const accountId = ctx.AccountId ?? undefined;
+    const peerId = ctx.From ?? ctx.To ?? undefined;
+    const binding = findIntentBinding({
+      cfg,
+      channel,
+      accountId: typeof accountId === "string" ? accountId : undefined,
+      peerId: typeof peerId === "string" ? peerId : undefined,
+    });
+    if (binding) {
+      const messageText =
+        (typeof ctx.BodyForCommands === "string" && ctx.BodyForCommands) ||
+        (typeof ctx.RawBody === "string" && ctx.RawBody) ||
+        (typeof ctx.Body === "string" && ctx.Body) ||
+        "";
+      const decision = await resolveIntentAgent({
+        cfg,
+        binding,
+        channel,
+        accountId: typeof accountId === "string" ? accountId : undefined,
+        peerId: typeof peerId === "string" ? peerId : undefined,
+        text: messageText,
+      });
+      const resolvedKey = sessionKey.replace(
+        `agent:${INTENT_PENDING_AGENT_ID}:`,
+        `agent:${decision.agentId}:`,
+      );
+      logVerbose(
+        `[claw-debug] intent-router: ${INTENT_PENDING_AGENT_ID} → ${decision.agentId} (reason="${decision.reason}", cached=${decision.cached}, fellBack=${decision.fellBack})`,
+      );
+      sessionKey = resolvedKey;
+      // Mutate ctx so all downstream readers see the resolved sessionKey.
+      ctx.SessionKey = resolvedKey;
+    } else {
+      // Sentinel emitted but binding lookup failed — log and let downstream
+      // operate on the sentinel sessionKey (sessions store may treat this as
+      // a new agent namespace, which is undesirable). Phase 2 D5 will harden.
+      logVerbose(
+        `[claw-debug] intent-router: sentinel sessionKey but no matching intent binding found, leaving sessionKey unresolved (channel=${channel})`,
+      );
+    }
+  }
   const startTime = diagnosticsEnabled ? Date.now() : 0;
   const canTrackSession = diagnosticsEnabled && Boolean(sessionKey);
 
@@ -232,11 +285,16 @@ export async function dispatchReplyFromConfig(
     if (!diagnosticsEnabled) {
       return;
     }
+    // CLAW-FORK 2026-05-03 (Phase 1, multi-agent): lazy-resolve agentId from
+    // sessionKey at log time so subsequent specialist routing surfaces in logs
+    // without restructuring the closure.
+    const agentId = sessionKey ? resolveAgentIdFromSessionKey(sessionKey) : undefined;
     logMessageProcessed({
       channel,
       chatId,
       messageId,
       sessionKey,
+      agentId,
       durationMs: Date.now() - startTime,
       outcome,
       reason: opts?.reason,
@@ -248,7 +306,8 @@ export async function dispatchReplyFromConfig(
     if (!canTrackSession || !sessionKey) {
       return;
     }
-    logMessageQueued({ sessionKey, channel, source: "dispatch" });
+    const agentId = sessionKey ? resolveAgentIdFromSessionKey(sessionKey) : undefined;
+    logMessageQueued({ sessionKey, channel, source: "dispatch", agentId });
     logSessionStateChange({
       sessionKey,
       state: "processing",
