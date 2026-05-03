@@ -73,7 +73,28 @@ const AcpBindingSchema = z
     }
   });
 
-export const BindingsSchema = z.array(z.union([RouteBindingSchema, AcpBindingSchema])).optional();
+// CLAW-FORK 2026-05-03 (Phase 2, multi-agent): intent-router binding.
+// See types.agents.ts AgentIntentBinding for design notes.
+const IntentBindingSchema = z
+  .object({
+    type: z.literal("intent"),
+    comment: z.string().optional(),
+    match: BindingMatchSchema,
+    router: z
+      .object({
+        agentId: z.string().min(1),
+        promptOverride: z.string().optional(),
+        fallbackAgentId: z.string().optional(),
+        cacheTtlSec: z.number().int().nonnegative().optional(),
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const BindingsSchema = z
+  .array(z.union([RouteBindingSchema, AcpBindingSchema, IntentBindingSchema]))
+  .optional();
 
 export const BroadcastStrategySchema = z.enum(["parallel", "sequential"]);
 

@@ -47,7 +47,10 @@ function collectReferencedAgentIds(cfg: OpenClawConfig): string[] {
   const bindings = cfg.bindings;
   if (Array.isArray(bindings)) {
     for (const binding of bindings) {
-      const id = binding?.agentId;
+      // CLAW-FORK 2026-05-03 (Phase 2, multi-agent): AgentIntentBinding has no
+      // direct `.agentId` (uses `router.agentId`). Read from both shapes so
+      // intent bindings still register their router agent's directory.
+      const id = binding?.type === "intent" ? binding.router?.agentId : binding?.agentId;
       if (typeof id === "string" && id.trim()) {
         ids.add(normalizeAgentId(id));
       }

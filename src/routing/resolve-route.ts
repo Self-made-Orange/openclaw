@@ -1,6 +1,7 @@
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import type { ChatType } from "../channels/chat-type.js";
 import { normalizeChatType } from "../channels/chat-type.js";
+import { INTENT_PENDING_AGENT_ID } from "../config/types.agents.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { shouldLogVerbose } from "../globals.js";
 import { logDebug } from "../logger.js";
@@ -11,6 +12,7 @@ import {
   routeBindingScopeMatches,
 } from "./binding-scope.js";
 import { listBindings } from "./bindings.js";
+import { findIntentBinding } from "./intent-router.js";
 import { peerKindMatches } from "./peer-kind-match.js";
 import {
   buildAgentMainSessionKey,
@@ -63,6 +65,12 @@ export type ResolvedAgentRoute = {
     | "binding.team"
     | "binding.account"
     | "binding.channel"
+    // CLAW-FORK 2026-05-03 (Phase 2, multi-agent): intent-router tier.
+    // When this matchedBy is set, `agentId` is the synthetic
+    // `INTENT_PENDING_AGENT_ID` sentinel — `dispatch-from-config.ts` MUST
+    // call `resolveIntentAgent()` and rebuild the route with the real
+    // agentId before invoking the agent runner.
+    | "binding.intent"
     | "default";
 };
 
@@ -808,6 +816,27 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
       }
       return choose(matched.binding.agentId, tier.matchedBy);
     }
+  }
+
+  // CLAW-FORK 2026-05-03 (Phase 2, multi-agent): intent-router tier.
+  // No peer/account/channel binding matched. If an `AgentIntentBinding`
+  // covers this channel/peer, surface the synthetic `INTENT_PENDING_AGENT_ID`
+  // sentinel — the dispatcher will resolve it via `resolveIntentAgent()`
+  // before calling the agent runner. Skipped when no intent binding present
+  // so the default tier still wins for backwards-compat.
+  const intentBinding = findIntentBinding({
+    cfg: input.cfg,
+    channel: input.channel,
+    accountId,
+    peerId: peer?.id,
+  });
+  if (intentBinding) {
+    if (shouldLogDebug) {
+      logDebug(
+        `[routing] match: matchedBy=binding.intent (deferred) router.agentId=${intentBinding.router.agentId}`,
+      );
+    }
+    return choose(INTENT_PENDING_AGENT_ID, "binding.intent");
   }
 
   return choose(resolveDefaultAgentId(input.cfg), "default");

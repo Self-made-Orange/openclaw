@@ -752,26 +752,20 @@ async function handleSlackBlockAction(params: {
     params.ctx.runtime.log?.(`[claw-debug] block_action navigation skip: actionId=${navActionId}`);
     return;
   }
-  // CLAW-FORK 2026-04-30: RLHF Stage 2 — feedback button click handler.
-  // Short-circuits before plugin interaction dispatch so feedback clicks
-  // never trigger an LLM run.
+  // CLAW-FORK 2026-05-03: 👍/👎 button feedback REMOVED. Replaced by emoji
+  // reactions handled in monitor/events/reactions.ts → format-feedback skill.
+  // Short-circuit branches kept (no-op) so any straggler clicks from old
+  // messages don't fall through to plugin interaction dispatch and trigger
+  // an LLM run. Imports retained — `feedback-followup.ts` cleanup is a
+  // separate sweep.
   if (
     navActionId === SLACK_FEEDBACK_GOOD_ACTION_ID ||
-    navActionId === SLACK_FEEDBACK_BAD_ACTION_ID
+    navActionId === SLACK_FEEDBACK_BAD_ACTION_ID ||
+    navActionId === SLACK_FEEDBACK_UNDO_ACTION_ID
   ) {
-    await handleFeedbackButtonClick({
-      args: params.args,
-      actionId: navActionId,
-      log: params.ctx.runtime.log,
-    });
-    return;
-  }
-  // CLAW-FORK 2026-04-30: feedback undo (accidental click rollback).
-  if (navActionId === SLACK_FEEDBACK_UNDO_ACTION_ID) {
-    await handleFeedbackUndoClick({
-      args: params.args,
-      log: params.ctx.runtime.log,
-    });
+    params.ctx.runtime.log?.(
+      `[claw-debug] feedback button click ignored (deprecated) actionId=${navActionId}`,
+    );
     return;
   }
   if (params.ctx.shouldDropMismatchedSlackEvent?.(body)) {

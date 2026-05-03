@@ -65,7 +65,43 @@ export type AgentAcpBinding = {
   };
 };
 
-export type AgentBinding = AgentRouteBinding | AgentAcpBinding;
+// CLAW-FORK 2026-05-03 (Phase 2, multi-agent): intent-router binding.
+// When the dispatcher sees a binding of this type for the inbound channel/peer,
+// it pauses the synchronous route resolution, asks the configured `router.agentId`
+// to classify the message, then routes to the agent the classifier picked.
+// Concretely: `resolveAgentRoute()` returns the synthetic sentinel agentId
+// `__intent_pending__`; `dispatch-from-config` detects it, calls
+// `resolveIntentAgent()`, then continues with the resolved real agentId.
+// Intentionally separate type so the binding tier can be enabled/scoped
+// per-channel without mixing with peer-direct routes.
+export type AgentIntentBinding = {
+  type: "intent";
+  comment?: string;
+  match: AgentBindingMatch;
+  router: {
+    /** Agent to invoke for classification. Should be a cheap/fast model. */
+    agentId: string;
+    /** Optional one-shot system prompt override for the classifier turn only. */
+    promptOverride?: string;
+    /** Fallback agent when the classifier times out / errors / returns invalid. */
+    fallbackAgentId?: string;
+    /** TTL seconds for the classifier cache. Default: 300. */
+    cacheTtlSec?: number;
+    /** Hard timeout for the classifier call in ms. Default: 8000. */
+    timeoutMs?: number;
+  };
+};
+
+export type AgentBinding = AgentRouteBinding | AgentAcpBinding | AgentIntentBinding;
+
+/**
+ * CLAW-FORK 2026-05-03 (Phase 2, multi-agent): synthetic agentId returned by
+ * `resolveAgentRoute()` when an intent-binding tier matched. The dispatcher
+ * MUST replace this with a real agentId via `resolveIntentAgent()` before
+ * proceeding to `getReplyFromConfig`. If a downstream consumer ever sees this
+ * as the final agentId, that's a bug — log loudly and fall back to default.
+ */
+export const INTENT_PENDING_AGENT_ID = "__intent_pending__";
 
 export type AgentConfig = {
   id: string;
