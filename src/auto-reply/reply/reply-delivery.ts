@@ -384,6 +384,7 @@ export function normalizeReplyPayloadDirectives(params: {
   }
 
   let mediaUrls = params.payload.mediaUrls ?? parsed?.mediaUrls;
+
   // CLAW-FORK: detect output/<file>.<ext> mentions in body or blocks. If the
   // file actually exists, auto-attach (rescues compliance lapses where Kimi
   // forgot the MEDIA directive). If missing, log a warning so we can spot
@@ -411,6 +412,97 @@ export function normalizeReplyPayloadDirectives(params: {
     );
   }
   const mediaUrl = params.payload.mediaUrl ?? parsed?.mediaUrl ?? mediaUrls?.[0];
+
+  // CLAW-FORK 2026-05-03: format-guard for HTML/PDF attachment responses.
+  //
+  // Kimi K2.6 frequently emits two banned shorthand fence forms instead of the
+  // 5-block RAW Slack Block Kit (header/section/divider/section.fields/context)
+  // that the slack-response skill mandates for media-attached replies:
+  //
+  //   1. {"interactive": {"text": "...", "buttons": [...]}}        — root has no `blocks`
+  //   2. {"blocks": [{"type": "text", ...}, {"type": "buttons"}]}  — only abstract types
+  //
+  // Both render as a near-empty Slack card next to the attachment. Prompt-only
+  // rules in AGENTS.md + slack-response/SKILL.md proved insufficient (verified
+  // 2026-05-03: bot violated the rules within minutes of tightening both files).
+  // This guard rewrites at dispatch time AFTER MEDIA: directive is parsed and
+  // mediaUrls is populated by the hallucination-guard auto-attach above.
+  //
+  // Rewrite output: a 3-block RAW kit (header + section.text + context with file
+  // path). Skips divider+fields because synthesizing meaningful field content from
+  // the shorthand text isn't reliable. Banned external-URL buttons in the fence
+  // are dropped — fork still auto-adds the "🌐 브라우저에서 열기" button for the
+  // attachment file.
+  const hasMediaForGuard = Boolean(mediaUrl) || Boolean(mediaUrls && mediaUrls.length > 0);
+  if (interactive && hasMediaForGuard) {
+    const ABSTRACT_BLOCK_TYPES = new Set(["text", "buttons", "select"]);
+    const interactiveObj = interactive as { blocks?: unknown[] } & Record<string, unknown>;
+    const interactiveBlocks = Array.isArray(interactiveObj.blocks)
+      ? (interactiveObj.blocks as Array<Record<string, unknown>>)
+      : undefined;
+    const isShorthandObject =
+      !interactiveBlocks &&
+      (typeof interactiveObj.text === "string" || Array.isArray(interactiveObj.buttons));
+    const isAbstractBlocksOnly =
+      interactiveBlocks &&
+      interactiveBlocks.length > 0 &&
+      interactiveBlocks.every((b) => {
+        const t = (b as { type?: unknown })?.type;
+        return typeof t === "string" && ABSTRACT_BLOCK_TYPES.has(t);
+      });
+    if (isShorthandObject || isAbstractBlocksOnly) {
+      const candidatePath = String(mediaUrl ?? mediaUrls?.[0] ?? "");
+      const fileBaseRaw = path.basename(candidatePath);
+      const fileBase = fileBaseRaw.replace(/\.[^.]+$/, "");
+      const titleHint =
+        fileBase
+          .replace(/-+\d{6,}-?\d{0,4}$/, "")
+          .replace(/[-_]+/g, " ")
+          .trim()
+          .slice(0, 150) || "Output";
+      let summary = "";
+      if (typeof interactiveObj.text === "string") {
+        summary = interactiveObj.text;
+      } else if (interactiveBlocks) {
+        summary = interactiveBlocks
+          .filter((b) => (b as { type?: string }).type === "text")
+          .map((b) => String((b as { text?: unknown }).text ?? ""))
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (!summary && text) {
+        summary = text;
+      }
+      const summaryClean =
+        summary
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .join("\n")
+          .slice(0, 2900) || "(첨부 파일 참고)";
+      const rewrittenBlocks: unknown[] = [
+        {
+          type: "header",
+          text: { type: "plain_text", text: titleHint, emoji: true },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: summaryClean },
+        },
+        {
+          type: "context",
+          elements: [{ type: "mrkdwn", text: `\`${fileBaseRaw}\`` }],
+        },
+      ];
+      injectedRawSlackBlocks = [...(injectedRawSlackBlocks ?? []), ...rewrittenBlocks];
+      // Drop the abstract interactive so we don't double-render with the RAW
+      // blocks injected into channelData.slack.blocks below.
+      interactive = undefined;
+      logVerbose(
+        `[claw-debug] format-guard: rewrote abstract shorthand to RAW Block Kit (file=${fileBaseRaw}, summary=${summaryClean.slice(0, 60).replace(/\n/g, " ")}…)`,
+      );
+    }
+  }
 
   // CLAW-FORK: auto-synthesize a minimal Block Kit section when a media
   // attachment exists but the agent did not emit an `openclaw-interactive`

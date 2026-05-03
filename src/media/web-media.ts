@@ -158,24 +158,21 @@ const HTML_SAFETY_DANGER_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> =
   { name: "form-tag", re: /<form\b/i },
 ];
 
-// CLAW-FORK: hyperscribe-rendered HTML signature. Allows pan/zoom + Chart.js
-// scripts that hyperscribe-render injects, since these come from a trusted
+// CLAW-FORK: outprint-rendered HTML signature. Allows pan/zoom + Chart.js
+// scripts that outprint-render injects, since these come from a trusted
 // local pipeline (envelope.json → schema-validated → render.mjs) and not
 // from arbitrary agent text. Detected via the renderer's distinctive
 // `data-theme=` root attribute paired with the inline pan/zoom comment.
 //
-// 2026-04-30: agent-outprint-skills swap added 9 new themes (notion default,
-// linear/vercel/stripe/supabase/shadcn-light/shadcn-dark/silent-house/audi-f1).
-// Old 4-theme regex blocked all of them, killing media attachment + open-browser
-// button. Updated to match all 13 themes.
-const HYPERSCRIBE_HTML_SIGNATURE_RE =
-  /<html[^>]*\sdata-theme\s*=\s*["'](?:studio|midnight|void|gallery|notion|linear|vercel|stripe|supabase|shadcn-light|shadcn-dark|silent-house|audi-f1)["']/i;
-const HYPERSCRIBE_INTERACTIVE_LAYER_MARKER = "Hyperscribe interactive layer";
+// 2026-05-03: outprint v2 trim — canvas always emits `data-theme="shadcn-dark"`
+// (or `shadcn-light` after toggle) on root. Brand themes (notion/linear/...)
+// load as additional CSS but the root attribute remains shadcn-{light,dark}.
+const OUTPRINT_HTML_SIGNATURE_RE =
+  /<html[^>]*\sdata-theme\s*=\s*["'](?:shadcn-light|shadcn-dark|notion|linear|vercel|stripe|supabase)["']/i;
+const OUTPRINT_INTERACTIVE_LAYER_MARKER = "Outprint interactive layer";
 
-function isHyperscribeRenderedHtml(text: string): boolean {
-  return (
-    HYPERSCRIBE_HTML_SIGNATURE_RE.test(text) && text.includes(HYPERSCRIBE_INTERACTIVE_LAYER_MARKER)
-  );
+function isOutprintRenderedHtml(text: string): boolean {
+  return OUTPRINT_HTML_SIGNATURE_RE.test(text) && text.includes(OUTPRINT_INTERACTIVE_LAYER_MARKER);
 }
 
 function validateHostReadHtmlSafety(buffer: Buffer): void {
@@ -189,10 +186,10 @@ function validateHostReadHtmlSafety(buffer: Buffer): void {
     );
   }
   const text = buffer.toString("utf-8");
-  // CLAW-FORK: bypass danger-pattern filter for hyperscribe-rendered HTML.
+  // CLAW-FORK: bypass danger-pattern filter for outprint-rendered HTML.
   // The renderer is a trusted local pipeline whose scripts (pan/zoom, Chart.js)
   // are catalog-bounded and don't execute arbitrary agent intent.
-  if (isHyperscribeRenderedHtml(text)) {
+  if (isOutprintRenderedHtml(text)) {
     return;
   }
   for (const { name, re } of HTML_SAFETY_DANGER_PATTERNS) {

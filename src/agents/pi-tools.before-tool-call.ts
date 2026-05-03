@@ -34,31 +34,31 @@ type HookOutcome = { blocked: true; reason: string } | { blocked: false; params:
 const log = createSubsystemLogger("agents/tools");
 const BEFORE_TOOL_CALL_WRAPPED = Symbol("beforeToolCallWrapped");
 
-// Hyperscribe envelope guard — fork patch (replaces legacy HTML template
+// Outprint envelope guard — fork patch (replaces legacy HTML template
 // fingerprint guard, 2026-04-27).
 //
 // Blocks direct `write` of `.html` artifacts under output/. Forces the agent
-// to use the JSON envelope → hyperscribe-render pipeline instead of hand-
+// to use the JSON envelope → outprint-render pipeline instead of hand-
 // rolling inline CSS. The block reason includes the catalog component list
 // so Kimi can compose a valid envelope on the retry without an extra Read.
-const HYPERSCRIBE_GUARD_HEAD =
-  "HTML write blocked. Direct .html authoring is disabled. Use the hyperscribe pipeline: (1) Write a JSON envelope to output/<topic>-<YYMMDD-HHMM>.envelope.json, (2) Bash: hyperscribe-render --in <envelope> --out <html> --mode auto, (3) MEDIA: <html>. The envelope is ~70% smaller than HTML and validates against a fixed catalog.";
+const OUTPRINT_GUARD_HEAD =
+  "HTML write blocked. Direct .html authoring is disabled. Use the outprint pipeline: (1) Write a JSON envelope to output/<topic>-<YYMMDD-HHMM>.envelope.json, (2) Bash: outprint-render --in <envelope> --out <html> --mode auto, (3) MEDIA: <html>. The envelope is ~70% smaller than HTML and validates against a fixed catalog.";
 
 // Catalog summary — kept inline so Kimi can compose envelopes from the block
 // message alone, no Read required. Required props are precise — they match
 // the schema validator at
-// /home/self-made-orange/src/agent-outprint-skills/plugins/hyperscribe/spec/catalog.json.
+// /home/self-made-orange/agent-outprint-skills/plugins/outprint/spec/catalog.json.
 // "?" suffix = optional. Items in arrays use { ... } notation for required
 // fields per item.
-const HYPERSCRIBE_CATALOG_SUMMARY = `Envelope skeleton (a2ui_version + catalog + is_task_complete + parts are all required at root):
+const OUTPRINT_CATALOG_SUMMARY = `Envelope skeleton (a2ui_version + catalog + is_task_complete + parts are all required at root):
 {
   "a2ui_version": "0.9",
-  "catalog": "hyperscribe/v1",
+  "catalog": "outprint/v1",
   "is_task_complete": true,
-  "parts": [ { "component": "hyperscribe/Page", "props": { "title": "..." }, "children": [ ... ] } ]
+  "parts": [ { "component": "outprint/Page", "props": { "title": "..." }, "children": [ ... ] } ]
 }
 
-Catalog (35 components, all in hyperscribe/v1 namespace, agent-outprint-skills source).
+Catalog (35 components, all in outprint/v1 namespace, agent-outprint-skills source).
 Format: ComponentName (REQUIRED PROPS | optional? props). Items in arrays show required item shape.
 
 Structure
@@ -117,7 +117,7 @@ Common pitfalls (top 5):
 2. Section requires BOTH "id" (string slug) AND "title".
 3. DataTable.columns each need {"key": "...", "label": "..."}; rows are objects keyed by column.key.
 4. Comparison.mode is "vs" or "grid" only — not "side-by-side".
-5. hyperscribe-render REQUIRES --mode flag (auto|light|dark). Omitting → "Invalid mode null" exit 4.
+5. outprint-render REQUIRES --mode flag (auto|light|dark). Omitting → "Invalid mode null" exit 4.
 
 Mapping examples:
 - "A vs B 비교" → Page > Section + KPICard×N + Comparison(mode=vs) + Callout
@@ -128,12 +128,12 @@ Mapping examples:
 - "프로세스" → Page > Swimlane OR FlowChart + StepList
 - "포트폴리오 / 랜딩 / 사이트" → Page > SiteHeader + EditorialStatement + Section > MosaicGrid > ProjectTile×N + PressMentions + WorkTypeRow×N + SiteFooter`;
 
-function buildHyperscribeBlockReason(targetPath: string): string {
+function buildOutprintBlockReason(targetPath: string): string {
   const envelopePath = targetPath.replace(/\.html$/i, ".envelope.json");
-  return `${HYPERSCRIBE_GUARD_HEAD}
+  return `${OUTPRINT_GUARD_HEAD}
 
 For this request, write to: ${envelopePath}
-Then run: hyperscribe-render --in ${envelopePath} --out ${targetPath} --theme notion --mode auto --quiet
+Then run: outprint-render --in ${envelopePath} --out ${targetPath} --theme notion --mode auto --quiet
 
 VISUALIZATION PLAN — make ONE pass over the content before composing the envelope:
 1. Classify content type: Topology | Flow | Comparison | Evidence | Narrative. One should DOMINATE.
@@ -147,7 +147,7 @@ VISUALIZATION PLAN — make ONE pass over the content before composing the envel
 4. Information density rule: prefer 1 dominant diagram > stacked Prose blocks. Repo/architecture/system explainers MUST include at least one of ArchitectureGrid, FlowChart, Swimlane, Sequence as dominant visual.
 5. Avoid: stacking unrelated components for "variety", opening with a table when a diagram explains it faster, opening with long Prose when user asked for visual.
 
-${HYPERSCRIBE_CATALOG_SUMMARY}`;
+${OUTPRINT_CATALOG_SUMMARY}`;
 }
 
 function readStringField(params: unknown, ...keys: string[]): string | undefined {
@@ -175,7 +175,7 @@ function checkHtmlTemplateGuard(
     return undefined;
   }
   // Don't gate template authorship paths — agent may legitimately seed new
-  // hyperscribe theme variants, README HTML, etc. Only the output artifact
+  // outprint theme variants, README HTML, etc. Only the output artifact
   // path is policed.
   const lowerPath = targetPath.toLowerCase();
   if (lowerPath.includes("/_templates/") || lowerPath.includes("\\_templates\\")) {
@@ -185,7 +185,7 @@ function checkHtmlTemplateGuard(
   // produces the .html separately, in a Bash exec step that doesn't go
   // through this hook. So any direct .html write here is by definition the
   // agent trying to bypass the pipeline — block.
-  return { blocked: true, reason: buildHyperscribeBlockReason(targetPath) };
+  return { blocked: true, reason: buildOutprintBlockReason(targetPath) };
 }
 
 const BEFORE_TOOL_CALL_HOOK_FAILURE_REASON =

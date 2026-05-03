@@ -1,3 +1,4 @@
+import fsSync from "node:fs";
 import path from "node:path";
 import type { MarkdownTableMode, OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
 import {
@@ -242,8 +243,51 @@ export async function deliverReplies(params: {
     // must not force threading.
     const inlineReplyToId = params.replyToMode === "off" ? undefined : payload.replyToId;
     const threadTs = inlineReplyToId ?? params.replyThreadTs;
-    const reply = resolveSendableOutboundReplyParts(payload);
-    const slackBlocks = readSlackReplyBlocks(payload);
+    let reply = resolveSendableOutboundReplyParts(payload);
+    // CLAW-FORK 2026-05-03: changed from const to let so the format-guard
+    // (~line 296+ for hasMedia path) can reassign with a rewritten RAW
+    // Block Kit when Kimi emits sparse abstract shorthand.
+    let slackBlocks = readSlackReplyBlocks(payload);
+
+    // CLAW-FORK 2026-05-03: codeblock-fence rescue.
+    //
+    // Gemini 2.5 Flash sometimes wraps the Block Kit JSON in a ```json
+    // markdown codeblock instead of the required <openclaw-interactive> fence
+    // (verified 2026-05-03 turns 12:03 + 12:05 — both wrapped 5-block RAW kits
+    // in ```json so resolveSlackReplyBlocks couldn't see them, format-guard
+    // then fell back to a sparse 3-block rewrite, AND raw JSON leaked into
+    // the Slack message body). Detect the pattern, lift the blocks out, and
+    // strip the codeblock from payload.text so the model's intended kit
+    // survives intact and raw JSON doesn't pollute the chat.
+    if (!slackBlocks || slackBlocks.length === 0) {
+      const rawText = (payload as { text?: string }).text ?? "";
+      const codeBlockMatch = rawText.match(
+        /```(?:json)?\s*(\{[\s\S]*?"blocks"\s*:\s*\[[\s\S]*?\][\s\S]*?\})\s*```/,
+      );
+      if (codeBlockMatch) {
+        try {
+          const parsed = JSON.parse(codeBlockMatch[1]) as { blocks?: unknown };
+          if (Array.isArray(parsed.blocks) && parsed.blocks.length > 0) {
+            slackBlocks = parsed.blocks as typeof slackBlocks;
+            const cleaned = rawText
+              .replace(codeBlockMatch[0], "")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim();
+            (payload as { text?: string }).text = cleaned;
+            // Re-resolve so reply.trimmedText / hasContent reflect the
+            // stripped body — otherwise downstream guards see the original
+            // text including the JSON dump.
+            reply = resolveSendableOutboundReplyParts(payload);
+            params.runtime.log?.(
+              `[claw-debug] codeblock-fence-rescue: extracted ${parsed.blocks.length} blocks from json codeblock; stripped from text`,
+            );
+          }
+        } catch {
+          // not valid JSON, leave as-is
+        }
+      }
+    }
+
     if (!reply.hasContent && !slackBlocks?.length) {
       continue;
     }
@@ -254,6 +298,85 @@ export async function deliverReplies(params: {
         `[claw-debug] dup-guard: suppressed duplicate delivery to ${params.target}`,
       );
       continue;
+    }
+
+    // CLAW-FORK 2026-05-03: media-existence guard.
+    //
+    // Detect when the agent emits a Block Kit fence + MEDIA: directive that
+    // points to a file it never actually wrote. Verified 2026-05-03 11:51 with
+    // Gemini 2.5 Flash: agent skipped the Write/Bash steps for envelope.json +
+    // outprint-render, but still emitted `MEDIA: output/tax-handling-...html`
+    // and a 5-block RAW fence as if the file existed. Slack got a card pointing
+    // at nothing — user 👎 was justified. Same instruction-following limitation
+    // as Kimi K2.6; prompt-only rules (AGENTS.md #6 "첨부 거짓말 절대 금지")
+    // are insufficient for both models.
+    //
+    // Strategy: scan raw `payload.text` for `MEDIA: <path>` and check
+    // `reply.mediaUrls` for any path that doesn't exist on disk. If ALL
+    // referenced media is missing, drop the misleading fence + send a
+    // text-only fallback acknowledging the failure. If only some are missing,
+    // pass through unchanged (mixed cases are rare and the existing
+    // hallucination-guard log will still flag them).
+    {
+      const workspaceRoot =
+        process.env.OPENCLAW_WORKSPACE || process.env.CLAW_AGENT_WORKSPACE || process.cwd();
+      const resolveMediaPath = (raw: string): string => {
+        if (path.isAbsolute(raw)) return raw;
+        return path.resolve(workspaceRoot, raw);
+      };
+      const isMissing = (raw: string): boolean => {
+        if (!raw || raw.startsWith("http://") || raw.startsWith("https://")) return false;
+        try {
+          return !fsSync.existsSync(resolveMediaPath(raw));
+        } catch {
+          return false;
+        }
+      };
+      const parsedMissing = (reply.mediaUrls ?? []).filter(isMissing);
+      const parsedTotal = (reply.mediaUrls ?? []).filter(
+        (u) => u && !u.startsWith("http://") && !u.startsWith("https://"),
+      ).length;
+      const rawText = (payload as { text?: string }).text ?? "";
+      const rawMediaPaths = Array.from(rawText.matchAll(/(?:^|\s)MEDIA:\s*([^\s<>]+)/g)).map(
+        (m) => m[1],
+      );
+      const rawMissing = rawMediaPaths.filter(isMissing);
+      // Trigger condition: text or parsed-mediaUrls referenced files, AND every
+      // local-path reference was missing on disk. Avoid false positives when
+      // some real attachments coexist with a stray fake reference.
+      const allParsedMissing = parsedTotal > 0 && parsedMissing.length === parsedTotal;
+      const allRawMissing = rawMediaPaths.length > 0 && rawMissing.length === rawMediaPaths.length;
+      const fullyHallucinated =
+        (parsedTotal === 0 && allRawMissing) || (parsedTotal > 0 && allParsedMissing);
+      if (fullyHallucinated) {
+        const allMissing = Array.from(new Set([...parsedMissing, ...rawMissing]));
+        const cleanedText = (reply.trimmedText || "")
+          .replace(/(?:^|\n)\s*MEDIA:\s*\S+\s*/g, "\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+        const fallbackText = cleanedText
+          ? `${cleanedText}\n\n_(첨부 파일 만들지 못해서 텍스트로만 답해 — 다시 요청하면 envelope 부터 새로 만들게.)_`
+          : `요청한 답변을 첨부로 만들지 못했어. 다시 요청해줘. (시도한 경로: ${allMissing[0]})`;
+        const mentioned = applyMentionPrefix({
+          text: fallbackText,
+          blocks: undefined,
+          senderId: params.senderId,
+          isThreadReply: Boolean(threadTs),
+        });
+        await sendMessageSlack(params.target, mentioned.text, {
+          cfg: params.cfg,
+          token: params.token,
+          threadTs,
+          accountId: params.accountId,
+          ...(params.identity ? { identity: params.identity } : {}),
+        });
+        params.runtime.log?.(
+          `[claw-debug] media-guard: dropped fake MEDIA path(s) (${allMissing.join(
+            ", ",
+          )}); sent text-only fallback to ${params.target}`,
+        );
+        continue;
+      }
     }
 
     if (!reply.hasMedia && slackBlocks?.length) {
@@ -297,6 +420,76 @@ export async function deliverReplies(params: {
       const trimmedSummary = reply.trimmedText;
       const summaryIsSilent =
         trimmedSummary && isSilentReplyText(trimmedSummary, SILENT_REPLY_TOKEN);
+
+      // CLAW-FORK 2026-05-03: format-guard for HTML/PDF attachment Slack cards.
+      //
+      // Kimi K2.6 ignores the slack-response/SKILL.md 5-block RAW template
+      // (header/section/divider/section.fields/context) and emits an abstract
+      // shorthand fence — typically `{interactive: {text, buttons}}` or
+      // `{blocks: [{type:"text"}, {type:"buttons"}]}`. Upstream converts both
+      // into a sparse 1~2-block Slack array (just a section + maybe an actions
+      // block of external URL buttons), losing the proper card structure.
+      //
+      // Detect the sparse pattern and rewrite to RAW: header (from filename) +
+      // section (preserve text) + context (file basename). External-URL
+      // buttons inside the original actions block are dropped — the fork
+      // auto-adds the "🌐 브라우저에서 열기" button below.
+      //
+      // Verified 2026-05-03: prompt-only rules (AGENTS.md + skill) failed to
+      // change Kimi behavior; this guard is the deterministic floor.
+      const RAW_BLOCK_TYPES = new Set(["header", "divider", "context", "image", "input", "table"]);
+      const sparseShorthand = (() => {
+        if (!slackBlocks || slackBlocks.length === 0) return false;
+        // Already RAW (has header / divider / context / image / table) — accept as-is.
+        const hasRichRaw = slackBlocks.some((b) => {
+          const t = (b as { type?: unknown })?.type;
+          return typeof t === "string" && RAW_BLOCK_TYPES.has(t);
+        });
+        if (hasRichRaw) return false;
+        // Section with `fields` array also counts as proper RAW (4-section template).
+        const hasFieldsSection = slackBlocks.some((b) => {
+          const obj = b as { type?: unknown; fields?: unknown };
+          return obj?.type === "section" && Array.isArray(obj.fields) && obj.fields.length > 0;
+        });
+        if (hasFieldsSection) return false;
+        // Otherwise: at most a single section + an actions block = sparse shorthand.
+        return slackBlocks.length <= 3;
+      })();
+      if (sparseShorthand) {
+        const candidatePath = reply.mediaUrls.find(Boolean) ?? "";
+        const fileBaseRaw = candidatePath ? (candidatePath.split("/").pop() ?? "") : "";
+        const fileBase = fileBaseRaw.replace(/\.[^.]+$/, "");
+        const titleHint =
+          fileBase
+            .replace(/-+\d{6,}-?\d{0,4}.*$/, "")
+            .replace(/[-_]+/g, " ")
+            .trim()
+            .slice(0, 150) || "Output";
+        // Extract any text content from the existing sparse blocks.
+        const extractedTexts: string[] = [];
+        for (const b of slackBlocks) {
+          const obj = b as Record<string, unknown>;
+          if (obj?.type === "section") {
+            const t = obj.text as { text?: unknown } | undefined;
+            if (typeof t?.text === "string") extractedTexts.push(t.text);
+          }
+        }
+        const fallbackText = trimmedSummary ?? "";
+        const summaryClean =
+          (extractedTexts.join("\n").trim() || fallbackText).slice(0, 2900) || "(첨부 파일 참고)";
+        const rewrittenBlocks: unknown[] = [
+          { type: "header", text: { type: "plain_text", text: titleHint, emoji: true } },
+          { type: "section", text: { type: "mrkdwn", text: summaryClean } },
+          {
+            type: "context",
+            elements: [{ type: "mrkdwn", text: `\`${fileBaseRaw || "output"}\`` }],
+          },
+        ];
+        slackBlocks = rewrittenBlocks as typeof slackBlocks;
+        params.runtime.log?.(
+          `[claw-debug] format-guard: rewrote sparse abstract slackBlocks to RAW (file=${fileBaseRaw}, summary=${summaryClean.slice(0, 60).replace(/\n/g, " ")}…)`,
+        );
+      }
 
       // CLAW-FORK: browser-action URL 사전 계산.
       //   1. Cloudflared tunnel URL (public https, 어디서나) — primary
