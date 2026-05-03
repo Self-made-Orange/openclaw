@@ -22,6 +22,10 @@ import {
   buildTunnelUrl,
   ensureOutputStaticServer,
 } from "./output-static-server.js";
+// CLAW-FORK 2026-05-03 (Phase 6 D2-D3, multi-agent): reviewer agent call.
+// First-iteration policy = log verdict only, do NOT block send. D4 chunk
+// will add reject-branch (specialist retry / safe fallback).
+import { callReviewer } from "./reviewer-call.js";
 import { sendMessageSlack, type SlackSendIdentity } from "./send.runtime.js";
 
 // CLAW-FORK: media staging dir, used to compute browser-direct URLs for
@@ -54,6 +58,20 @@ try {
 
 export function readSlackReplyBlocks(payload: ReplyPayload) {
   return resolveSlackReplyBlocks(payload);
+}
+
+// CLAW-FORK 2026-05-03 (Phase 6, multi-agent): best-effort extract agentId
+// from a payload. ReplyPayload doesn't carry agentId directly, but the
+// dispatcher's sessionKey (`agent:<id>:...`) is sometimes attached as
+// `payload.sessionKey` or `payload.metadata.sessionKey`. We just return the
+// agentId or undefined — reviewer is fine with undefined.
+function extractAgentIdFromPayload(payload: ReplyPayload): string | undefined {
+  const sessionKey =
+    (payload as { sessionKey?: unknown }).sessionKey ??
+    (payload as { metadata?: { sessionKey?: unknown } }).metadata?.sessionKey;
+  if (typeof sessionKey !== "string" || !sessionKey) return undefined;
+  const match = sessionKey.match(/^agent:([a-z0-9_-]+):/i);
+  return match ? match[1] : undefined;
 }
 
 // CLAW-FORK: 데코 이모지 (`📊` 차트, `📁` 폴더, `📎` 클립) 와 그 Slack 코드 형태
@@ -256,6 +274,72 @@ export async function deliverReplies(params: {
     // Block Kit when Kimi emits sparse abstract shorthand.
     let slackBlocks = readSlackReplyBlocks(payload);
 
+    // CLAW-FORK 2026-05-03 (Phase 6 D4, multi-agent): reviewer hook + reject branch.
+    // Fired ONCE per reply payload, before any send-branch resolution, so
+    // every outbound reply (text-only, blocks-only, media+blocks) gets
+    // reviewed exactly once.
+    //
+    // D4 policy:
+    // - approve (or fail-safe approve on reviewer error/timeout) → continue
+    //   to normal send branches.
+    // - reject → skip all send branches and post a 1-line safe fallback
+    //   so the user knows the answer was withheld + can re-prompt.
+    //
+    // False-positive risk is mitigated by the reviewer's "when in doubt,
+    // approve" rule + the fail-safe approve on every reviewer error path.
+    {
+      const draftReply =
+        reply.trimmedText ||
+        (typeof (payload as { text?: string }).text === "string"
+          ? (payload as { text: string }).text
+          : "");
+      if (draftReply) {
+        const toolCallNames = Array.isArray(
+          (payload as { metadata?: { toolCallNames?: unknown } }).metadata?.toolCallNames,
+        )
+          ? (payload as { metadata: { toolCallNames: string[] } }).metadata.toolCallNames
+          : undefined;
+        try {
+          const verdict = await callReviewer({
+            agentId: extractAgentIdFromPayload(payload),
+            isChannelRoot: !threadTs,
+            draftReply,
+            toolCallNames,
+          });
+          params.runtime.log?.(
+            `[claw-debug] reviewer: verdict=${verdict.verdict} reason="${verdict.reason}" ${verdict.durationMs}ms${verdict.fellBack ? " (fallback)" : ""}`,
+          );
+          if (verdict.verdict === "reject") {
+            const fallbackText =
+              `_⚠️ 답변 검증에서 ` +
+              `\`${verdict.reason.slice(0, 100)}\` 사유로 차단됐어. ` +
+              `다시 요청해줘._`;
+            const mentioned = applyMentionPrefix({
+              text: fallbackText,
+              blocks: undefined,
+              senderId: params.senderId,
+              isThreadReply: Boolean(threadTs),
+            });
+            await sendMessageSlack(params.target, mentioned.text, {
+              cfg: params.cfg,
+              token: params.token,
+              threadTs,
+              accountId: params.accountId,
+              ...(params.identity ? { identity: params.identity } : {}),
+            });
+            params.runtime.log?.(
+              `[claw-debug] reviewer: rejected reply withheld; sent fallback to ${params.target}`,
+            );
+            continue;
+          }
+        } catch {
+          // Reviewer threw outside its own fail-safe (shouldn't happen) —
+          // proceed with normal send to avoid blocking on a broken side-channel.
+          params.runtime.log?.("[claw-debug] reviewer: unexpected throw; proceeding with send");
+        }
+      }
+    }
+
     // CLAW-FORK 2026-05-03: codeblock-fence rescue.
     //
     // Gemini 2.5 Flash sometimes wraps the Block Kit JSON in a ```json
@@ -403,6 +487,7 @@ export async function deliverReplies(params: {
         senderId: params.senderId,
         isThreadReply: Boolean(threadTs),
       });
+      // (Reviewer hook fires once at the top of the for-loop — D3.5.)
       await sendMessageSlack(params.target, mentioned.text, {
         cfg: params.cfg,
         token: params.token,

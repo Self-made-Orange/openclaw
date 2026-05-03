@@ -516,18 +516,14 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       usedReplyThreadTs ??= replyThreadTs;
     }
     replyPlan.markSent();
-    // CLAW-FORK 2026-04-30: RLHF Stage 2 — post 👍/👎 follow-up in thread.
-    // Skipped for short / yes-no / error replies (see shouldPostFeedbackButtons).
-    // prepared.replyTarget is "channel:CXXX" form; Slack chat.postMessage needs raw "CXXX".
-    if (replyThreadTs && shouldPostFeedbackButtons(params.payload)) {
-      const rawChannelId = message.channel ?? prepared.replyTarget.replace(/^channel:/, "");
-      void postFeedbackButtonsInThread({
-        token: ctx.botToken,
-        channelId: rawChannelId,
-        threadTs: replyThreadTs,
-        log: runtime.log,
-      });
-    }
+    // CLAW-FORK 2026-05-03: 👍/👎 button feedback REMOVED. Replaced by
+    // emoji reactions (`:+1:` / `:-1:` / `:saved-for-later:`) handled in
+    // monitor/events/reactions.ts → format-feedback skill. Buttons added
+    // visual noise to every reply thread; reactions are zero-noise and
+    // reuse Slack's native UX. shouldPostFeedbackButtons /
+    // postFeedbackButtonsInThread imports kept temporarily so the rest of
+    // feedback-followup.ts (click handler) can be cleanly removed in a
+    // follow-up sweep without breaking imports during transition.
   };
 
   const deliverWithStreaming = async (params: {
