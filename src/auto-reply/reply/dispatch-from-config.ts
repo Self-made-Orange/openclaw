@@ -26,6 +26,8 @@ import {
 } from "../../hooks/message-hook-mappers.js";
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+// CLAW-FORK 2026-05-03 (Phase 4 D1, multi-agent): per-agent metrics jsonl.
+import { recordAgentMetrics } from "../../logging/agent-metrics.js";
 import {
   logMessageProcessed,
   logMessageQueued,
@@ -296,6 +298,9 @@ export async function dispatchReplyFromConfig(
     // sessionKey at log time so subsequent specialist routing surfaces in logs
     // without restructuring the closure.
     const agentId = sessionKey ? resolveAgentIdFromSessionKey(sessionKey) : undefined;
+    const durationMs = Date.now() - startTime;
+    const computedReason =
+      opts?.reason ?? (routeIntentReason ? `intent:${routeIntentReason}` : undefined);
     logMessageProcessed({
       channel,
       chatId,
@@ -307,9 +312,25 @@ export async function dispatchReplyFromConfig(
       // for `matchedBy=binding.intent` to count routing decisions per channel.
       // Only populated for the intent path; other tiers will land in Phase 4.
       matchedBy: routeMatchedBy,
-      durationMs: Date.now() - startTime,
+      durationMs,
       outcome,
-      reason: opts?.reason ?? (routeIntentReason ? `intent:${routeIntentReason}` : undefined),
+      reason: computedReason,
+      error: opts?.error,
+    });
+    // CLAW-FORK 2026-05-03 (Phase 4 D1, multi-agent): mirror to JSONL for
+    // offline analysis (per-agent counts, p50/p95 latency, intent-reason
+    // distribution). Best-effort, never throws.
+    recordAgentMetrics({
+      ts: new Date().toISOString(),
+      agentId,
+      matchedBy: routeMatchedBy,
+      intentReason: routeIntentReason,
+      channel,
+      chatId: chatId == null ? undefined : String(chatId),
+      messageId: messageId == null ? undefined : String(messageId),
+      outcome,
+      durationMs,
+      reason: opts?.reason,
       error: opts?.error,
     });
   };
