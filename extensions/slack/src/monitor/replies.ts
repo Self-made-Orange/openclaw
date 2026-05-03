@@ -202,6 +202,13 @@ function applyMentionPrefix(params: {
   if (!Array.isArray(params.blocks) || params.blocks.length === 0) {
     return { text: newText, blocks: params.blocks };
   }
+  // CLAW-FORK 2026-05-03: 두 번 멘션 방지 — text 에 이미 멘션 있으면
+  // blocks 에도 또 박지 않음. Slack 카드와 fallback text 가 동시에 보내질
+  // 때 사용자는 둘 중 하나만 봄 (mrkdwn block 우선) — 어느 쪽에 1번 있으면
+  // 충분. text 분기에서 이미 hasMentionInText 가 true 면 skip.
+  if (hasMentionInText) {
+    return { text: newText, blocks: params.blocks };
+  }
   // 첫 번째 mrkdwn 텍스트 블록에 mention 한번 prepend (header 의 plain_text 는 건드리지 않음).
   let injected = false;
   const newBlocks = params.blocks.map((block) => {

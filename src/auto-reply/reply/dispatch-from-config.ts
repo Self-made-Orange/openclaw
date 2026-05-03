@@ -230,6 +230,9 @@ export async function dispatchReplyFromConfig(
   // async (cheap-model LLM call), then we rebuild the sessionKey by swapping
   // the sentinel agentId for the resolved one.
   let sessionKey = ctx.SessionKey;
+  // Track for log payload below (D5b). Only populated on intent-router path.
+  let routeMatchedBy: string | undefined;
+  let routeIntentReason: string | undefined;
   if (sessionKey && sessionKey.includes(`agent:${INTENT_PENDING_AGENT_ID}:`)) {
     const accountId = ctx.AccountId ?? undefined;
     const peerId = ctx.From ?? ctx.To ?? undefined;
@@ -263,6 +266,8 @@ export async function dispatchReplyFromConfig(
       sessionKey = resolvedKey;
       // Mutate ctx so all downstream readers see the resolved sessionKey.
       ctx.SessionKey = resolvedKey;
+      routeMatchedBy = "binding.intent";
+      routeIntentReason = `${decision.reason}${decision.cached ? " (cached)" : ""}${decision.fellBack ? " (fellBack)" : ""}`;
     } else {
       // Sentinel emitted but binding lookup failed — log and let downstream
       // operate on the sentinel sessionKey (sessions store may treat this as
@@ -270,6 +275,8 @@ export async function dispatchReplyFromConfig(
       logVerbose(
         `[claw-debug] intent-router: sentinel sessionKey but no matching intent binding found, leaving sessionKey unresolved (channel=${channel})`,
       );
+      routeMatchedBy = "binding.intent.unresolved";
+      routeIntentReason = "no-matching-intent-binding";
     }
   }
   const startTime = diagnosticsEnabled ? Date.now() : 0;
@@ -295,9 +302,14 @@ export async function dispatchReplyFromConfig(
       messageId,
       sessionKey,
       agentId,
+      // CLAW-FORK 2026-05-03 (Phase 2 D5b, multi-agent): expose intent-router
+      // resolution decision in the per-message diagnostic line so we can grep
+      // for `matchedBy=binding.intent` to count routing decisions per channel.
+      // Only populated for the intent path; other tiers will land in Phase 4.
+      matchedBy: routeMatchedBy,
       durationMs: Date.now() - startTime,
       outcome,
-      reason: opts?.reason,
+      reason: opts?.reason ?? (routeIntentReason ? `intent:${routeIntentReason}` : undefined),
       error: opts?.error,
     });
   };
