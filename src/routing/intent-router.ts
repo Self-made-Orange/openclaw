@@ -301,15 +301,26 @@ export function findIntentBinding(params: {
   const bindings = params.cfg.bindings;
   if (!Array.isArray(bindings)) return undefined;
   const channel = params.channel.toLowerCase();
+  // CLAW-FORK 2026-05-03 (diag fix): peer.id comparison MUST be case-insensitive.
+  // Other fork binding tiers (resolve-route.ts) normalize inbound peer.id to
+  // lowercase (Slack channel id `C0ATZBA2EKX` arrives as `c0atzba2ekx`), but
+  // user-authored binding configs typically keep the original Slack uppercase
+  // ID. Without lowercasing both sides, every intent binding silently
+  // mismatches — diagnosed 2026-05-03 from 0 binding.intent log lines.
+  const inboundPeerId = params.peerId?.toLowerCase();
+  const inboundAccountId = params.accountId?.toLowerCase();
   for (const b of bindings) {
     if (b.type !== "intent") continue;
     if (b.match.channel.toLowerCase() !== channel) continue;
-    // Account scope (optional)
-    if (b.match.accountId && params.accountId && b.match.accountId !== params.accountId) continue;
-    // Peer scope (optional) — if binding scopes to a peer, inbound peer must match.
+    // Account scope (optional, case-insensitive)
+    if (b.match.accountId) {
+      if (!inboundAccountId) continue;
+      if (b.match.accountId.toLowerCase() !== inboundAccountId) continue;
+    }
+    // Peer scope (optional, case-insensitive)
     if (b.match.peer) {
-      if (!params.peerId) continue;
-      if (b.match.peer.id !== params.peerId) continue;
+      if (!inboundPeerId) continue;
+      if (b.match.peer.id.toLowerCase() !== inboundPeerId) continue;
     }
     return b;
   }

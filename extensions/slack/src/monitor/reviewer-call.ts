@@ -44,6 +44,37 @@ export type ReviewerVerdict = {
   raw?: string;
 };
 
+// CLAW-FORK 2026-05-03 (diag fix): persist reject decisions to a JSONL so
+// Joon can mine recurring patterns and feed them back into specialist
+// SYSTEM.md prompts. Every reject (including fallback approve→reject if any
+// future variant adds it) appends one line. Best-effort, never throws.
+export function recordReviewerReject(record: {
+  ts: string;
+  agentId?: string;
+  draftReply: string;
+  reason: string;
+  durationMs: number;
+}): void {
+  let line: string;
+  try {
+    line = `${JSON.stringify({
+      ...record,
+      // Truncate draft to keep file scannable.
+      draftReply: record.draftReply.slice(0, 800),
+    })}\n`;
+  } catch {
+    return;
+  }
+  try {
+    const home = process.env.HOME ?? os.homedir();
+    const filePath = path.join(home, ".openclaw", "state", "reviewer-rejects.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.appendFileSync(filePath, line, { encoding: "utf8" });
+  } catch {
+    // ignore
+  }
+}
+
 export type ReviewerCallParams = {
   agentId?: string;
   isChannelRoot: boolean;

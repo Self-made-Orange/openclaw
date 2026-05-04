@@ -22,10 +22,14 @@ import {
   buildTunnelUrl,
   ensureOutputStaticServer,
 } from "./output-static-server.js";
-// CLAW-FORK 2026-05-03 (Phase 6 D2-D3, multi-agent): reviewer agent call.
-// First-iteration policy = log verdict only, do NOT block send. D4 chunk
-// will add reject-branch (specialist retry / safe fallback).
-import { callReviewer } from "./reviewer-call.js";
+// CLAW-FORK 2026-05-03 (Phase 6, multi-agent): reviewer agent call.
+// Filter pattern (per Kimi 2026-05-03 19:03 design feedback + Joon
+// 19:57 follow-up): reject NEVER blocks the send — answer ships, reject
+// reason is appended as a footer + recorded to reviewer-rejects.jsonl
+// for later prompt iteration. False-positive cost (user sees a footer
+// that doesn't apply) is tiny vs the data-loss cost of withholding the
+// whole reply.
+import { callReviewer, recordReviewerReject } from "./reviewer-call.js";
 import { sendMessageSlack, type SlackSendIdentity } from "./send.runtime.js";
 
 // CLAW-FORK: media staging dir, used to compute browser-direct URLs for
@@ -310,27 +314,29 @@ export async function deliverReplies(params: {
             `[claw-debug] reviewer: verdict=${verdict.verdict} reason="${verdict.reason}" ${verdict.durationMs}ms${verdict.fellBack ? " (fallback)" : ""}`,
           );
           if (verdict.verdict === "reject") {
-            const fallbackText =
-              `_⚠️ 답변 검증에서 ` +
-              `\`${verdict.reason.slice(0, 100)}\` 사유로 차단됐어. ` +
-              `다시 요청해줘._`;
-            const mentioned = applyMentionPrefix({
-              text: fallbackText,
-              blocks: undefined,
-              senderId: params.senderId,
-              isThreadReply: Boolean(threadTs),
+            // Filter (not gate). Per Joon 2026-05-03 19:57: full-block reject
+            // is data-loss for the user. Pattern instead: SHIP the answer +
+            // append a small footer + record reject for later prompt iteration.
+            recordReviewerReject({
+              ts: new Date().toISOString(),
+              agentId: extractAgentIdFromPayload(payload),
+              draftReply,
+              reason: verdict.reason,
+              durationMs: verdict.durationMs,
             });
-            await sendMessageSlack(params.target, mentioned.text, {
-              cfg: params.cfg,
-              token: params.token,
-              threadTs,
-              accountId: params.accountId,
-              ...(params.identity ? { identity: params.identity } : {}),
-            });
+            const footer = `\n\n_⚠️ reviewer: ${verdict.reason.slice(0, 200)}_`;
+            const mut = payload as { text?: string };
+            if (typeof mut.text === "string" && mut.text) {
+              mut.text = `${mut.text}${footer}`;
+            } else {
+              mut.text = `${draftReply}${footer}`;
+            }
+            // Re-resolve so reply.trimmedText / hasContent reflect the
+            // footer-suffixed body for the downstream send branches.
+            reply = resolveSendableOutboundReplyParts(payload);
             params.runtime.log?.(
-              `[claw-debug] reviewer: rejected reply withheld; sent fallback to ${params.target}`,
+              `[claw-debug] reviewer: appended reject footer (${verdict.reason.slice(0, 60)}) — proceeding with send`,
             );
-            continue;
           }
         } catch {
           // Reviewer threw outside its own fail-safe (shouldn't happen) —
