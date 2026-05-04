@@ -5,6 +5,8 @@ import {
 } from "openclaw/plugin-sdk/reply-payload";
 import { resolveRunModelFallbacksOverride } from "../../agents/agent-scope.js";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
+import { runCliAgent } from "../../agents/cli-runner.js";
+import { getCliSessionBinding } from "../../agents/cli-session.js";
 import { resolveContextTokensForModel } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
@@ -224,6 +226,11 @@ export function createFollowupRunner(params: {
       resetTriggered: false,
       upstreamAbortSignal: opts?.abortSignal,
     });
+    // Track status so finally can fire onTurnEnd. Optimistic "done" — flipped
+    // to "error" on any caught/rethrown error. Early-return paths (no payloads,
+    // silent reply) keep "done" because the agent did process the message.
+    let turnStatus: "done" | "error" = "done";
+    let turnError: unknown;
     try {
       const runId = crypto.randomUUID();
       const shouldSurfaceToControlUi = isInternalMessageChannel(
@@ -278,7 +285,59 @@ export function createFollowupRunner(params: {
             classifyEmbeddedPiRunResultForModelFallback({ result, provider, model }),
           run: async (provider, model, runOptions) => {
             const authProfile = resolveRunAuthProfile(run, provider, { config: runtimeConfig });
+            // CLI-backed providers (claude-cli/*) are not registered in the embedded
+            // runner's model registry, so calling runEmbeddedPiAgent for them throws
+            // "Unknown model" and falls back to a different provider — typically a
+            // moonshot/kimi model that produces identity-collapsed replies because
+            // the system prompt absorption is weaker. Route these to runCliAgent
+            // (the same path agent-runner-execution uses for initial dispatches).
             let attemptCompactionCount = 0;
+            if (isCliProvider(provider, runtimeConfig)) {
+              const cliSessionBinding = getCliSessionBinding(activeSessionEntry, provider);
+              const hookMessageProvider = resolveOriginMessageProvider({
+                originatingChannel: queued.originatingChannel,
+                provider: run.messageProvider,
+              });
+              const cliResult = await runCliAgent({
+                sessionId: run.sessionId,
+                sessionKey: run.sessionKey,
+                agentId: run.agentId,
+                trigger: opts?.isHeartbeat ? "heartbeat" : "user",
+                sessionFile: run.sessionFile,
+                workspaceDir: run.workspaceDir,
+                config: runtimeConfig,
+                prompt: queued.prompt,
+                provider,
+                model,
+                thinkLevel: run.thinkLevel,
+                timeoutMs: run.timeoutMs,
+                runId,
+                extraSystemPrompt: run.extraSystemPrompt,
+                extraSystemPromptStatic: run.extraSystemPromptStatic,
+                ownerNumbers: run.ownerNumbers,
+                cliSessionId: cliSessionBinding?.sessionId,
+                cliSessionBinding,
+                authProfileId: authProfile.authProfileId,
+                bootstrapPromptWarningSignaturesSeen,
+                bootstrapPromptWarningSignature:
+                  bootstrapPromptWarningSignaturesSeen[
+                    bootstrapPromptWarningSignaturesSeen.length - 1
+                  ],
+                images: queuedImages,
+                imageOrder: queuedImageOrder,
+                skillsSnapshot: run.skillsSnapshot,
+                messageChannel: queued.originatingChannel ?? undefined,
+                messageProvider: hookMessageProvider,
+                agentAccountId: run.agentAccountId,
+                senderIsOwner: run.senderIsOwner,
+                abortSignal: replyOperation.abortSignal ?? opts?.abortSignal,
+                replyOperation,
+              });
+              bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
+                cliResult.meta?.systemPromptReport,
+              );
+              return cliResult;
+            }
             try {
               const result = await runEmbeddedPiAgent({
                 allowGatewaySubagentBinding: true,
@@ -373,6 +432,8 @@ export function createFollowupRunner(params: {
         const message = formatErrorMessage(err);
         replyOperation.fail("run_failed", err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
+        turnStatus = "error";
+        turnError = err;
         return;
       }
 
@@ -480,6 +541,10 @@ export function createFollowupRunner(params: {
         provider: providerUsed,
         modelId: modelUsed,
       });
+    } catch (err) {
+      turnStatus = "error";
+      turnError = err;
+      throw err;
     } finally {
       replyOperation.complete();
       // Both signals are required for the typing controller to clean up.
@@ -491,6 +556,18 @@ export function createFollowupRunner(params: {
       // indefinitely until the TTL expires).
       typing.markRunComplete();
       typing.markDispatchIdle();
+      // Fire per-item turn-end callback so transports (e.g., Slack status
+      // reactions) can finalize per-message UX after the asynchronous drain.
+      // Wrapped because callback failures must not affect the queue.
+      if (queued.onTurnEnd) {
+        try {
+          await queued.onTurnEnd({ status: turnStatus, error: turnError });
+        } catch (cbErr) {
+          defaultRuntime.error?.(
+            `Followup onTurnEnd callback failed: ${formatErrorMessage(cbErr)}`,
+          );
+        }
+      }
     }
   };
 }

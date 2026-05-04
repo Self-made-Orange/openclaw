@@ -963,6 +963,45 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
           }
           pushPreviewToolProgress(payload.summary ?? payload.title ?? "patch applied");
         },
+        // Per-message followup completion callback. When this message is
+        // queued behind an active run (queue mode "followup"), the synchronous
+        // dispatch returns before the agent actually replies. The drain runs
+        // asynchronously later and delivers the reply via routeReply; nothing
+        // in dispatch's finalize block knows that delivery happened, so the
+        // status reaction stays stuck at the initial/queued emoji. Wire this
+        // callback to finalize the per-message statusReactions when the drain
+        // completes for THIS message id (closure captures the right instance).
+        onFollowupTurnEnd: statusReactionsEnabled
+          ? async ({ status }) => {
+              try {
+                if (status === "done") {
+                  await statusReactions.setDone();
+                  if (ctx.removeAckAfterReply) {
+                    void (async () => {
+                      await sleep(statusReactionTiming.doneHoldMs);
+                      await statusReactions.clear();
+                    })();
+                  } else {
+                    void statusReactions.restoreInitial();
+                  }
+                } else {
+                  await statusReactions.setError();
+                  if (ctx.removeAckAfterReply) {
+                    void (async () => {
+                      await sleep(statusReactionTiming.errorHoldMs);
+                      await statusReactions.restoreInitial();
+                    })();
+                  } else {
+                    void statusReactions.restoreInitial();
+                  }
+                }
+              } catch (err) {
+                logVerbose(
+                  `slack dispatch: onFollowupTurnEnd reaction update failed: ${formatErrorMessage(err)}`,
+                );
+              }
+            }
+          : undefined,
       },
     });
     queuedFinal = result.queuedFinal;

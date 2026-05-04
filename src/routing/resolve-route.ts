@@ -638,8 +638,21 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
       }
     : null;
 
+  // CLAW-FORK 2026-05-03 (diag fix): intent binding present → SKIP route cache.
+  // The cache key doesn't include any signal that would distinguish a
+  // first-turn cache miss (which DOES walk the intent tier) from later
+  // cache hits (which return the cached agentId directly). Since the
+  // intent tier is the only path that can yield INTENT_PENDING_AGENT_ID,
+  // caching its decision freezes the route to the default tier's first
+  // result and the intent-router never fires again. Disable cache outright
+  // when any intent binding is configured — fresh resolve per turn, ~zero
+  // overhead (binding lookup is ~O(N) over a tiny list).
+  const hasIntentBinding =
+    Array.isArray(input.cfg.bindings) && input.cfg.bindings.some((b) => b?.type === "intent");
   const routeCache =
-    !shouldLogDebug && !identityLinks ? resolveRouteCacheForConfig(input.cfg) : null;
+    !shouldLogDebug && !identityLinks && !hasIntentBinding
+      ? resolveRouteCacheForConfig(input.cfg)
+      : null;
   const routeCacheKey = routeCache
     ? buildResolvedRouteCacheKey({
         channel,
@@ -663,7 +676,15 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
   const bindingsIndex = getEvaluatedBindingIndexForChannelAccount(input.cfg, channel, accountId);
 
   const choose = (agentId: string, matchedBy: ResolvedAgentRoute["matchedBy"]) => {
-    const resolvedAgentId = pickFirstExistingAgentId(input.cfg, agentId);
+    // CLAW-FORK 2026-05-04 (router fix root cause): pickFirstExistingAgentId
+    // would silently downgrade INTENT_PENDING_AGENT_ID to the default agent
+    // ("main") because the sentinel isn't in agents.list[]. That collapsed
+    // every intent route to main BEFORE dispatch-from-config could detect
+    // the sentinel in sessionKey. Pass the sentinel through unchanged.
+    const resolvedAgentId =
+      agentId === INTENT_PENDING_AGENT_ID
+        ? INTENT_PENDING_AGENT_ID
+        : pickFirstExistingAgentId(input.cfg, agentId);
     const sessionKey = normalizeLowercaseStringOrEmpty(
       buildAgentSessionKey({
         agentId: resolvedAgentId,
@@ -802,8 +823,10 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     if (!tier.enabled) {
       continue;
     }
+
     const matched = tier.candidates.find(
       (candidate) =>
+        candidate.binding.type !== "intent" &&
         tier.predicate(candidate) &&
         matchesBindingScope(candidate.match, {
           ...baseScope,
@@ -811,9 +834,6 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
         }),
     );
     if (matched) {
-      if (shouldLogDebug) {
-        logDebug(`[routing] match: matchedBy=${tier.matchedBy} agentId=${matched.binding.agentId}`);
-      }
       return choose(matched.binding.agentId, tier.matchedBy);
     }
   }
@@ -831,11 +851,6 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     peerId: peer?.id,
   });
   if (intentBinding) {
-    if (shouldLogDebug) {
-      logDebug(
-        `[routing] match: matchedBy=binding.intent (deferred) router.agentId=${intentBinding.router.agentId}`,
-      );
-    }
     return choose(INTENT_PENDING_AGENT_ID, "binding.intent");
   }
 

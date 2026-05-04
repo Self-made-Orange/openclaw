@@ -24,6 +24,14 @@ export type FollowupRun = {
   prompt: string;
   /** Provider message ID, when available (for deduplication). */
   messageId?: string;
+  /**
+   * Called after this item's followup turn completes (success or error).
+   * Used by transports (e.g., Slack) to finalize per-message status reactions
+   * after the asynchronous followup drain delivers the reply. Each queued
+   * message carries its own callback so the right transport context is
+   * preserved across drain order.
+   */
+  onTurnEnd?: (info: { status: "done" | "error"; error?: unknown }) => Promise<void> | void;
   summaryLine?: string;
   enqueuedAt: number;
   images?: Array<{ type: "image"; data: string; mimeType: string }>;
