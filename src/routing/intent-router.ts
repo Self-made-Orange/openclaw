@@ -44,6 +44,18 @@ type CacheEntry = {
 const cache = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<IntentRouterDecision>>();
 
+// Sticky-thread map: pins a resolved agentId to a thread for the lifetime of
+// this gateway process so subsequent messages in the same thread skip
+// classification and route consistently to the same agent.
+// NOTE: In-process memory only — evaporates on gateway restart.
+type StickyThreadEntry = {
+  agentId: string;
+  /** Preserved alongside agentId so the sticky can degrade gracefully if the
+   *  pinned agent is later removed from config mid-session. */
+  fallbackAgentId: string;
+};
+const stickyThreadMap = new Map<string, StickyThreadEntry>();
+
 function pruneExpired(now: number): void {
   for (const [k, v] of cache) {
     if (v.expiresAt <= now) cache.delete(k);
@@ -327,8 +339,61 @@ export function findIntentBinding(params: {
   return undefined;
 }
 
+/**
+ * Extract the canonical thread key from a sessionKey, or undefined if the
+ * message is not part of a thread.
+ *
+ * SessionKey format: `agent:<agentId>:<channel>:<type>:<peerId>[:thread:<tid>]`
+ * Thread key (returned): `<channel>:<type>:<peerId>:thread:<tid>`
+ */
+export function extractThreadKeyFromSessionKey(sessionKey: string): string | undefined {
+  if (!sessionKey.includes(":thread:")) return undefined;
+  const match = sessionKey.match(/^agent:[^:]+:(.+)$/);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Pin a resolved agentId to a thread for the lifetime of this gateway process.
+ * Subsequent messages in the same thread skip classification and use this agent
+ * (thread consistency priority over fresh classification).
+ *
+ * NOTE: stored in process memory — evaporates on gateway restart.
+ *
+ * @param threadKey       Canonical thread identifier — use {@link extractThreadKeyFromSessionKey}.
+ * @param agentId         The resolved agentId to pin.
+ * @param fallbackAgentId The binding's fallback, preserved for graceful degradation.
+ */
+export function setStickyThreadAgent(
+  threadKey: string,
+  agentId: string,
+  fallbackAgentId: string,
+): void {
+  stickyThreadMap.set(threadKey, { agentId, fallbackAgentId });
+}
+
+/**
+ * Return the sticky routing decision for a thread if one was set in this
+ * process lifetime, and emit the grep-friendly log line.
+ * Returns undefined for non-thread messages or for the first message in a thread.
+ *
+ * NOTE: evaporates on gateway restart.
+ */
+export function checkStickyThreadAgent(threadKey: string): IntentRouterDecision | undefined {
+  const entry = stickyThreadMap.get(threadKey);
+  if (!entry) return undefined;
+  // Grep-friendly: [intent-router] thread-sticky:<agentId> hit for <threadKey>
+  log.debug(`thread-sticky:${entry.agentId} hit for ${threadKey}`);
+  return {
+    agentId: entry.agentId,
+    reason: `thread-sticky (fallback=${entry.fallbackAgentId})`,
+    cached: false,
+    fellBack: false,
+  };
+}
+
 // Test-only escape hatch. Not exported from package index — only the test file imports it.
 export function __resetIntentRouterCacheForTesting(): void {
   cache.clear();
   inflight.clear();
+  stickyThreadMap.clear();
 }
