@@ -819,18 +819,11 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     },
   ];
 
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[claw-diag-r2] tier loop start, channel=${input.channel} peer=${JSON.stringify(input.peer)} bindingsCount=${Array.isArray(input.cfg.bindings) ? input.cfg.bindings.length : "n/a"}`,
-  );
   for (const tier of tiers) {
     if (!tier.enabled) {
       continue;
     }
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[claw-diag-r2] tier=${tier.matchedBy} candidates=${tier.candidates.length} candidateTypes=${tier.candidates.map((c) => c.binding.type ?? "(undef)").join(",")}`,
-    );
+
     const matched = tier.candidates.find(
       (candidate) =>
         candidate.binding.type !== "intent" &&
@@ -841,15 +834,9 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
         }),
     );
     if (matched) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[claw-diag-r2] MATCH tier=${tier.matchedBy} agentId=${matched.binding.agentId ?? "(undef)"} type=${matched.binding.type ?? "(undef)"}`,
-      );
       return choose(matched.binding.agentId, tier.matchedBy);
     }
   }
-  // eslint-disable-next-line no-console
-  console.warn(`[claw-diag-r2] tier loop done, no match — going to intent tier`);
 
   // CLAW-FORK 2026-05-03 (Phase 2, multi-agent): intent-router tier.
   // No peer/account/channel binding matched. If an `AgentIntentBinding`
@@ -864,14 +851,8 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     peerId: peer?.id,
   });
   if (intentBinding) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[claw-diag-r2] INTENT MATCH router.agentId=${intentBinding.router.agentId} → return INTENT_PENDING_AGENT_ID`,
-    );
     return choose(INTENT_PENDING_AGENT_ID, "binding.intent");
   }
 
-  // eslint-disable-next-line no-console
-  console.warn(`[claw-diag-r2] DEFAULT FALLBACK agentId=${resolveDefaultAgentId(input.cfg)}`);
   return choose(resolveDefaultAgentId(input.cfg), "default");
 }
