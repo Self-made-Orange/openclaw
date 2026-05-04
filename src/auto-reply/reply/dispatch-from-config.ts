@@ -237,12 +237,21 @@ export async function dispatchReplyFromConfig(
   let routeIntentReason: string | undefined;
   if (sessionKey && sessionKey.includes(`agent:${INTENT_PENDING_AGENT_ID}:`)) {
     const accountId = ctx.AccountId ?? undefined;
-    const peerId = ctx.From ?? ctx.To ?? undefined;
+    // CLAW-FORK 2026-05-04 (router fix v2): ctx.From/ctx.To don't reliably
+    // hold the channel/peer id for inbound channel messages — peer id is
+    // most reliably embedded in sessionKey itself (e.g.
+    // `agent:__intent_pending__:slack:channel:c0atzba2ekx[:thread:...]`).
+    // Parse it out so findIntentBinding receives the same id that the
+    // upstream resolveAgentRoute saw when it emitted the sentinel.
+    const sessionPeerMatch = sessionKey.match(/:slack:(?:channel|direct|group|dm):([^:]+)/i);
+    const sessionPeerId = sessionPeerMatch ? sessionPeerMatch[1] : undefined;
+    const peerId =
+      sessionPeerId ?? (typeof ctx.From === "string" ? ctx.From : undefined) ?? undefined;
     const binding = findIntentBinding({
       cfg,
       channel,
       accountId: typeof accountId === "string" ? accountId : undefined,
-      peerId: typeof peerId === "string" ? peerId : undefined,
+      peerId,
     });
     if (binding) {
       const messageText =
@@ -271,14 +280,20 @@ export async function dispatchReplyFromConfig(
       routeMatchedBy = "binding.intent";
       routeIntentReason = `${decision.reason}${decision.cached ? " (cached)" : ""}${decision.fellBack ? " (fellBack)" : ""}`;
     } else {
-      // Sentinel emitted but binding lookup failed — log and let downstream
-      // operate on the sentinel sessionKey (sessions store may treat this as
-      // a new agent namespace, which is undesirable). Phase 2 D5 will harden.
+      // CLAW-FORK 2026-05-04 (router fix v2 safety net): if findIntentBinding
+      // can't match here (binding lookup mismatch / timing race / etc), do NOT
+      // let the sentinel propagate to the agent runner — it would create a
+      // ghost `agents/__intent_pending__/sessions/...` namespace and trigger
+      // a fresh-bootstrap "Hi I just came online" reply with no AGENTS.md
+      // context. Rewrite the sentinel to "main" and proceed safely.
+      const safeKey = sessionKey.replace(`agent:${INTENT_PENDING_AGENT_ID}:`, `agent:main:`);
       logVerbose(
-        `[claw-debug] intent-router: sentinel sessionKey but no matching intent binding found, leaving sessionKey unresolved (channel=${channel})`,
+        `[claw-debug] intent-router: sentinel sessionKey but no matching intent binding (channel=${channel}); falling back to main`,
       );
+      sessionKey = safeKey;
+      ctx.SessionKey = safeKey;
       routeMatchedBy = "binding.intent.unresolved";
-      routeIntentReason = "no-matching-intent-binding";
+      routeIntentReason = "no-matching-intent-binding (fallback main)";
     }
   }
   const startTime = diagnosticsEnabled ? Date.now() : 0;

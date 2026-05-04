@@ -676,7 +676,15 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
   const bindingsIndex = getEvaluatedBindingIndexForChannelAccount(input.cfg, channel, accountId);
 
   const choose = (agentId: string, matchedBy: ResolvedAgentRoute["matchedBy"]) => {
-    const resolvedAgentId = pickFirstExistingAgentId(input.cfg, agentId);
+    // CLAW-FORK 2026-05-04 (router fix root cause): pickFirstExistingAgentId
+    // would silently downgrade INTENT_PENDING_AGENT_ID to the default agent
+    // ("main") because the sentinel isn't in agents.list[]. That collapsed
+    // every intent route to main BEFORE dispatch-from-config could detect
+    // the sentinel in sessionKey. Pass the sentinel through unchanged.
+    const resolvedAgentId =
+      agentId === INTENT_PENDING_AGENT_ID
+        ? INTENT_PENDING_AGENT_ID
+        : pickFirstExistingAgentId(input.cfg, agentId);
     const sessionKey = normalizeLowercaseStringOrEmpty(
       buildAgentSessionKey({
         agentId: resolvedAgentId,
@@ -811,19 +819,20 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     },
   ];
 
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[claw-diag-r2] tier loop start, channel=${input.channel} peer=${JSON.stringify(input.peer)} bindingsCount=${Array.isArray(input.cfg.bindings) ? input.cfg.bindings.length : "n/a"}`,
+  );
   for (const tier of tiers) {
     if (!tier.enabled) {
       continue;
     }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[claw-diag-r2] tier=${tier.matchedBy} candidates=${tier.candidates.length} candidateTypes=${tier.candidates.map((c) => c.binding.type ?? "(undef)").join(",")}`,
+    );
     const matched = tier.candidates.find(
       (candidate) =>
-        // CLAW-FORK 2026-05-03 (diag fix): exclude intent-type bindings from
-        // the peer/channel/account tier matching. Intent bindings have a
-        // `.router.agentId` (not `.agentId`); when they accidentally matched
-        // here, `matched.binding.agentId === undefined` and choose() fell
-        // through to `pickFirstExistingAgentId` returning "main", which
-        // bypassed the intent tier entirely. Intent bindings MUST only be
-        // resolved by the dedicated intent tier below.
         candidate.binding.type !== "intent" &&
         tier.predicate(candidate) &&
         matchesBindingScope(candidate.match, {
@@ -832,9 +841,15 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
         }),
     );
     if (matched) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[claw-diag-r2] MATCH tier=${tier.matchedBy} agentId=${matched.binding.agentId ?? "(undef)"} type=${matched.binding.type ?? "(undef)"}`,
+      );
       return choose(matched.binding.agentId, tier.matchedBy);
     }
   }
+  // eslint-disable-next-line no-console
+  console.warn(`[claw-diag-r2] tier loop done, no match — going to intent tier`);
 
   // CLAW-FORK 2026-05-03 (Phase 2, multi-agent): intent-router tier.
   // No peer/account/channel binding matched. If an `AgentIntentBinding`
@@ -849,13 +864,14 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     peerId: peer?.id,
   });
   if (intentBinding) {
-    if (shouldLogDebug) {
-      logDebug(
-        `[routing] match: matchedBy=binding.intent (deferred) router.agentId=${intentBinding.router.agentId}`,
-      );
-    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[claw-diag-r2] INTENT MATCH router.agentId=${intentBinding.router.agentId} → return INTENT_PENDING_AGENT_ID`,
+    );
     return choose(INTENT_PENDING_AGENT_ID, "binding.intent");
   }
 
+  // eslint-disable-next-line no-console
+  console.warn(`[claw-diag-r2] DEFAULT FALLBACK agentId=${resolveDefaultAgentId(input.cfg)}`);
   return choose(resolveDefaultAgentId(input.cfg), "default");
 }
