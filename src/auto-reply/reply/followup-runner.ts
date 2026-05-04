@@ -226,6 +226,11 @@ export function createFollowupRunner(params: {
       resetTriggered: false,
       upstreamAbortSignal: opts?.abortSignal,
     });
+    // Track status so finally can fire onTurnEnd. Optimistic "done" — flipped
+    // to "error" on any caught/rethrown error. Early-return paths (no payloads,
+    // silent reply) keep "done" because the agent did process the message.
+    let turnStatus: "done" | "error" = "done";
+    let turnError: unknown;
     try {
       const runId = crypto.randomUUID();
       const shouldSurfaceToControlUi = isInternalMessageChannel(
@@ -427,6 +432,8 @@ export function createFollowupRunner(params: {
         const message = formatErrorMessage(err);
         replyOperation.fail("run_failed", err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
+        turnStatus = "error";
+        turnError = err;
         return;
       }
 
@@ -534,6 +541,10 @@ export function createFollowupRunner(params: {
         provider: providerUsed,
         modelId: modelUsed,
       });
+    } catch (err) {
+      turnStatus = "error";
+      turnError = err;
+      throw err;
     } finally {
       replyOperation.complete();
       // Both signals are required for the typing controller to clean up.
@@ -545,6 +556,18 @@ export function createFollowupRunner(params: {
       // indefinitely until the TTL expires).
       typing.markRunComplete();
       typing.markDispatchIdle();
+      // Fire per-item turn-end callback so transports (e.g., Slack status
+      // reactions) can finalize per-message UX after the asynchronous drain.
+      // Wrapped because callback failures must not affect the queue.
+      if (queued.onTurnEnd) {
+        try {
+          await queued.onTurnEnd({ status: turnStatus, error: turnError });
+        } catch (cbErr) {
+          defaultRuntime.error?.(
+            `Followup onTurnEnd callback failed: ${formatErrorMessage(cbErr)}`,
+          );
+        }
+      }
     }
   };
 }

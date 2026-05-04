@@ -682,6 +682,11 @@ export async function runPreparedReply(
   const followupRun = {
     prompt: queuedBody,
     messageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
+    // Per-item callback so transports (e.g., Slack status reactions) can
+    // finalize per-message UX after the asynchronous followup drain delivers
+    // the reply. The callback is captured per inbound message — each queued
+    // item carries its own, so order of drain does not matter.
+    onTurnEnd: opts?.onFollowupTurnEnd,
     summaryLine: baseBodyTrimmedRaw,
     enqueuedAt: Date.now(),
     images: opts?.images,

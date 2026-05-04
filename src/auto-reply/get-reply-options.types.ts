@@ -152,4 +152,12 @@ export type GetReplyOptions = {
   hasRepliedRef?: { value: boolean };
   /** Override agent timeout in seconds (0 = no timeout). Threads through to resolveAgentTimeoutMs. */
   timeoutOverrideSeconds?: number;
+  /**
+   * Called after this turn's followup queue item completes (success or error).
+   * Wired through into the queued FollowupRun so transports (e.g., Slack status
+   * reactions) can finalize the per-message UX after the asynchronous drain
+   * delivers the reply. Only fires when the message was queued for followup;
+   * direct (non-queued) dispatches finalize via onBlockReply / dispatch flow.
+   */
+  onFollowupTurnEnd?: (info: { status: "done" | "error"; error?: unknown }) => Promise<void> | void;
 };
