@@ -46,6 +46,7 @@ import { getGlobalHookRunner, getGlobalPluginRegistry } from "../../plugins/hook
 // CLAW-FORK 2026-05-03 (Phase 1+2, multi-agent): for log enrichment +
 // intent-router sentinel resolution.
 import {
+  checkParentAgent,
   checkStickyThreadAgent,
   extractThreadKeyFromSessionKey,
   findIntentBinding,
@@ -266,16 +267,36 @@ export async function dispatchReplyFromConfig(
         (typeof ctx.RawBody === "string" && ctx.RawBody) ||
         (typeof ctx.Body === "string" && ctx.Body) ||
         "";
-      // Thread-sticky check: if a prior message in this thread already
-      // resolved an agent, reuse it for consistency instead of re-classifying.
-      // NOTE: sticky is in-process memory — evaporates on gateway restart.
+      // Resolve agent in priority order:
+      // 1. thread-sticky — same thread already resolved an agent earlier
+      // 2. parent-agent inherit — thread first message inherits the agent of
+      //    its parent message (the bot reply this thread was opened on)
+      // 3. keyword classifier — fallback for fresh dispatches
+      // NOTE: both sticky and parent-agent are in-process memory — evaporate
+      // on gateway restart.
       const threadKey = extractThreadKeyFromSessionKey(sessionKey);
+      const parentTs = threadKey?.split(":thread:")[1];
       const stickyDecision: IntentRouterDecision | undefined = threadKey
         ? checkStickyThreadAgent(threadKey)
         : undefined;
+      const inheritDecision: IntentRouterDecision | undefined =
+        !stickyDecision && parentTs ? checkParentAgent(parentTs) : undefined;
       let decision: IntentRouterDecision;
+      let routeMatchedBySuffix = "";
       if (stickyDecision) {
         decision = stickyDecision;
+        routeMatchedBySuffix = ".thread-sticky";
+      } else if (inheritDecision) {
+        decision = inheritDecision;
+        routeMatchedBySuffix = ".thread-inherit";
+        // Promote inherit to sticky so follow-up messages skip the lookup too.
+        if (threadKey) {
+          setStickyThreadAgent(
+            threadKey,
+            decision.agentId,
+            binding.router.fallbackAgentId ?? "main",
+          );
+        }
       } else {
         decision = await resolveIntentAgent({
           cfg,
@@ -306,7 +327,7 @@ export async function dispatchReplyFromConfig(
       sessionKey = resolvedKey;
       // Mutate ctx so all downstream readers see the resolved sessionKey.
       ctx.SessionKey = resolvedKey;
-      routeMatchedBy = stickyDecision ? "binding.intent.thread-sticky" : "binding.intent";
+      routeMatchedBy = `binding.intent${routeMatchedBySuffix}`;
       routeIntentReason = `${decision.reason}${decision.cached ? " (cached)" : ""}${decision.fellBack ? " (fellBack)" : ""}`;
     } else {
       // CLAW-FORK 2026-05-04 (router fix v2 safety net): if findIntentBinding
