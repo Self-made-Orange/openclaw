@@ -155,6 +155,16 @@ export type AgentConfig = {
   tools?: AgentToolsConfig;
   /** Optional runtime descriptor for this agent. */
   runtime?: AgentRuntimeConfig;
+  /**
+   * Optional per-agent reviewer policy.
+   * - "on" (default): runtime reviewer hook validates outbound replies and may
+   *   append a reject footer.
+   * - "off": skip reviewer entirely. Use for direct-to-user agents where the
+   *   user is the deployment-gate (e.g. self-improve reviews via branch diff;
+   *   data-analyst bots verify against external dashboards). Reviewer footers
+   *   add noise without value in those flows.
+   */
+  reviewer?: "on" | "off";
 };
 
 export type AgentsConfig = {

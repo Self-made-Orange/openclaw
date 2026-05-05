@@ -9,6 +9,7 @@ import {
 } from "openclaw/plugin-sdk/reply-chunking";
 import {
   deliverTextOrMediaReply,
+  getReplyPayloadMetadata,
   resolveSendableOutboundReplyParts,
   type ReplyPayload,
 } from "openclaw/plugin-sdk/reply-payload";
@@ -299,28 +300,23 @@ export async function deliverReplies(params: {
           ? (payload as { text: string }).text
           : "");
       if (draftReply) {
-        const toolCallNames = Array.isArray(
-          (payload as { metadata?: { toolCallNames?: unknown } }).metadata?.toolCallNames,
-        )
-          ? (payload as { metadata: { toolCallNames: string[] } }).metadata.toolCallNames
-          : undefined;
+        // Tool call names are stamped on the payload's metadata (WeakMap-backed)
+        // by dispatch-from-config.ts. Older code paths read `payload.metadata`
+        // as a property — that field never existed on the payload object so it
+        // always returned undefined, causing reviewer false-negatives on every
+        // MEDIA reply. Use getReplyPayloadMetadata for the actual data.
+        const toolCallNames = getReplyPayloadMetadata(payload)?.toolCallNames;
         // Skip reviewer for direct-to-user agents where the user reviews
-        // outputs themselves (no need for runtime middle layer):
-        // - self-improve: user reviews branch diffs at merge step
-        // - growth-marketer-vespexx / growth-marketer-personal: user verifies
-        //   data analysis directly against Amplitude dashboards
-        // The reviewer adds noisy reject footers that hurt readability of
-        // structured analysis answers.
-        // TODO: replace hardcoded list with per-agent `reviewer: "off"` config.
+        // outputs themselves (e.g. self-improve via branch diff, data-analyst
+        // bots against external dashboards). Read from per-agent
+        // `agents.list[].reviewer: "off"` config.
         const reviewerAgentId = extractAgentIdFromPayload(payload);
-        const REVIEWER_SKIP_AGENTS = new Set([
-          "self-improve",
-          "growth-marketer-vespexx",
-          "growth-marketer-personal",
-        ]);
-        if (reviewerAgentId && REVIEWER_SKIP_AGENTS.has(reviewerAgentId)) {
+        const reviewerPolicy = reviewerAgentId
+          ? params.cfg.agents?.list?.find((entry) => entry.id === reviewerAgentId)?.reviewer
+          : undefined;
+        if (reviewerAgentId && reviewerPolicy === "off") {
           params.runtime.log?.(
-            `[claw-debug] reviewer: skipped for ${reviewerAgentId} (user is the deployment-gate reviewer)`,
+            `[claw-debug] reviewer: skipped for ${reviewerAgentId} (agents.list[].reviewer=off)`,
           );
         } else
           try {
