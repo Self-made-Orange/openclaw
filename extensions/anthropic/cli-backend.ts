@@ -24,7 +24,15 @@ export function buildAnthropicCliBackend(): CliBackendPlugin {
         binaryName: "claude",
       },
     },
-    bundleMcp: true,
+    // CLAW-FORK 2026-05-05: disabled to allow user-scope MCP (claude.ai
+    // connectors like Amplitude / Notion / Figma / Gmail / Calendar / Slack)
+    // to flow through to bot sessions. Strict-mcp-config + bundle-only mode
+    // blocked these connectors entirely. openclaw loopback MCP is not
+    // currently used by any agent (no `mcp__openclaw__*` tool calls in
+    // production logs), so disabling is safe. If openclaw loopback becomes
+    // needed later, add per-agent override or merge user-scope MCP into the
+    // bundle config instead.
+    bundleMcp: false,
     bundleMcpMode: "claude-config-file",
     config: {
       command: "claude",
