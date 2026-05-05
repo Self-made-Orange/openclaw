@@ -304,15 +304,23 @@ export async function deliverReplies(params: {
         )
           ? (payload as { metadata: { toolCallNames: string[] } }).metadata.toolCallNames
           : undefined;
-        // self-improve agent has the user (Claude Code CLI) as a deployment-gate
-        // reviewer at the branch-merge step — runtime reviewer here only adds
-        // a noisy footer to bot replies that the user already reviews via
-        // `git diff main...<branch>`. Skip to keep self-improve channel clean.
-        // TODO: replace hardcoded check with per-agent `reviewer: "off"` config.
+        // Skip reviewer for direct-to-user agents where the user reviews
+        // outputs themselves (no need for runtime middle layer):
+        // - self-improve: user reviews branch diffs at merge step
+        // - growth-marketer-vespexx / growth-marketer-personal: user verifies
+        //   data analysis directly against Amplitude dashboards
+        // The reviewer adds noisy reject footers that hurt readability of
+        // structured analysis answers.
+        // TODO: replace hardcoded list with per-agent `reviewer: "off"` config.
         const reviewerAgentId = extractAgentIdFromPayload(payload);
-        if (reviewerAgentId === "self-improve") {
+        const REVIEWER_SKIP_AGENTS = new Set([
+          "self-improve",
+          "growth-marketer-vespexx",
+          "growth-marketer-personal",
+        ]);
+        if (reviewerAgentId && REVIEWER_SKIP_AGENTS.has(reviewerAgentId)) {
           params.runtime.log?.(
-            "[claw-debug] reviewer: skipped for self-improve agent (user is the deployment-gate reviewer)",
+            `[claw-debug] reviewer: skipped for ${reviewerAgentId} (user is the deployment-gate reviewer)`,
           );
         } else
           try {
