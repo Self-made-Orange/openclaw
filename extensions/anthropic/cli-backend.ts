@@ -24,16 +24,17 @@ export function buildAnthropicCliBackend(): CliBackendPlugin {
         binaryName: "claude",
       },
     },
-    // CLAW-FORK 2026-05-05: disabled to allow user-scope MCP (claude.ai
-    // connectors like Amplitude / Notion / Figma / Gmail / Calendar / Slack)
-    // to flow through to bot sessions. Strict-mcp-config + bundle-only mode
-    // blocked these connectors entirely. openclaw loopback MCP is not
-    // currently used by any agent (no `mcp__openclaw__*` tool calls in
-    // production logs), so disabling is safe. If openclaw loopback becomes
-    // needed later, add per-agent override or merge user-scope MCP into the
-    // bundle config instead.
-    bundleMcp: false,
+    // CLAW-FORK 2026-05-05: re-enabled together with bundleMcpStrict=false so
+    // both surfaces co-exist:
+    //   - bundle MCP (openclaw loopback) → exposes fork's api.registerTool
+    //     tools as `mcp__openclaw__*` (e.g. slack_read_channel for the
+    //     data-lime bot reading its own workspace channel history).
+    //   - user-scope MCP → claude.ai connectors (Amplitude / Notion / Figma /
+    //     Gmail / Calendar / Slack) keep loading from the user config because
+    //     `--strict-mcp-config` is no longer pushed when strict=false.
+    bundleMcp: true,
     bundleMcpMode: "claude-config-file",
+    bundleMcpStrict: false,
     config: {
       command: "claude",
       args: [

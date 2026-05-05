@@ -12,6 +12,19 @@ function registerSlackPluginHttpRoutes(api: OpenClawPluginApi): void {
   register(api);
 }
 
+function registerSlackTools(api: OpenClawPluginApi): void {
+  const register = loadBundledEntryExportSync<(api: OpenClawPluginApi) => void>(import.meta.url, {
+    specifier: "./tools-api.js",
+    exportName: "registerSlackTools",
+  });
+  register(api);
+}
+
+function registerSlackFull(api: OpenClawPluginApi): void {
+  registerSlackPluginHttpRoutes(api);
+  registerSlackTools(api);
+}
+
 export default defineBundledChannelEntry({
   id: "slack",
   name: "Slack",
@@ -33,5 +46,5 @@ export default defineBundledChannelEntry({
     specifier: "./account-inspect-api.js",
     exportName: "inspectSlackReadOnlyAccount",
   },
-  registerFull: registerSlackPluginHttpRoutes,
+  registerFull: registerSlackFull,
 });

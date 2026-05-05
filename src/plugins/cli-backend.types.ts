@@ -79,6 +79,16 @@ export type CliBackendPlugin = {
    */
   bundleMcpMode?: CliBundleMcpMode;
   /**
+   * Claude-only: whether to add `--strict-mcp-config` alongside `--mcp-config`.
+   *
+   * Strict mode restricts the CLI to ONLY the bundle MCP config, blocking any
+   * user-scope MCP servers (e.g. claude.ai connectors). Set to `false` to keep
+   * user-scope MCPs available alongside the bundle.
+   *
+   * Default: `true` (preserves prior behavior).
+   */
+  bundleMcpStrict?: boolean;
+  /**
    * Optional config normalizer applied after user overrides merge.
    *
    * Use this for backend-specific compatibility rewrites when old config

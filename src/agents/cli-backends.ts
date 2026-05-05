@@ -31,6 +31,7 @@ export type ResolvedCliBackend = {
   config: CliBackendConfig;
   bundleMcp: boolean;
   bundleMcpMode?: CliBundleMcpMode;
+  bundleMcpStrict?: boolean;
   pluginId?: string;
   transformSystemPrompt?: CliBackendPlugin["transformSystemPrompt"];
   textTransforms?: PluginTextTransforms;
@@ -50,6 +51,7 @@ export type ResolvedCliBackendLiveTest = {
 type FallbackCliBackendPolicy = {
   bundleMcp: boolean;
   bundleMcpMode?: CliBundleMcpMode;
+  bundleMcpStrict?: boolean;
   baseConfig?: CliBackendConfig;
   normalizeConfig?: (
     config: CliBackendConfig,
@@ -89,6 +91,7 @@ function resolveSetupCliBackendPolicy(provider: string): FallbackCliBackendPolic
       entry.backend.bundleMcpMode,
       entry.backend.bundleMcp === true,
     ),
+    bundleMcpStrict: entry.backend.bundleMcpStrict,
     baseConfig: entry.backend.config,
     normalizeConfig: entry.backend.normalizeConfig,
     transformSystemPrompt: entry.backend.transformSystemPrompt,
@@ -221,6 +224,7 @@ export function resolveCliBackendConfig(
         registered.bundleMcpMode,
         registered.bundleMcp === true,
       ),
+      bundleMcpStrict: registered.bundleMcpStrict,
       pluginId: registered.pluginId,
       transformSystemPrompt: registered.transformSystemPrompt,
       textTransforms: mergePluginTextTransforms(runtimeTextTransforms, registered.textTransforms),
@@ -247,6 +251,7 @@ export function resolveCliBackendConfig(
       config: { ...baseConfig, command },
       bundleMcp: fallbackPolicy.bundleMcp,
       bundleMcpMode: fallbackPolicy.bundleMcpMode,
+      bundleMcpStrict: fallbackPolicy.bundleMcpStrict,
       transformSystemPrompt: fallbackPolicy.transformSystemPrompt,
       textTransforms: mergePluginTextTransforms(
         runtimeTextTransforms,
@@ -272,6 +277,7 @@ export function resolveCliBackendConfig(
     config: { ...config, command },
     bundleMcp: fallbackPolicy?.bundleMcp === true,
     bundleMcpMode: fallbackPolicy?.bundleMcpMode,
+    bundleMcpStrict: fallbackPolicy?.bundleMcpStrict,
     transformSystemPrompt: fallbackPolicy?.transformSystemPrompt,
     textTransforms: mergePluginTextTransforms(
       runtimeTextTransforms,

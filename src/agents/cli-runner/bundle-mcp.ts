@@ -66,7 +66,11 @@ function findMcpConfigPath(args?: string[]): string | undefined {
   return undefined;
 }
 
-function injectClaudeMcpConfigArgs(args: string[] | undefined, mcpConfigPath: string): string[] {
+function injectClaudeMcpConfigArgs(
+  args: string[] | undefined,
+  mcpConfigPath: string,
+  strict = true,
+): string[] {
   const next: string[] = [];
   for (let i = 0; i < (args?.length ?? 0); i += 1) {
     const arg = args?.[i] ?? "";
@@ -82,7 +86,10 @@ function injectClaudeMcpConfigArgs(args: string[] | undefined, mcpConfigPath: st
     }
     next.push(arg);
   }
-  next.push("--strict-mcp-config", "--mcp-config", mcpConfigPath);
+  if (strict) {
+    next.push("--strict-mcp-config");
+  }
+  next.push("--mcp-config", mcpConfigPath);
   return next;
 }
 
@@ -318,6 +325,7 @@ async function prepareModeSpecificBundleMcpConfig(params: {
   backend: CliBackendConfig;
   mergedConfig: BundleMcpConfig;
   env?: Record<string, string>;
+  strict?: boolean;
 }): Promise<PreparedCliBundleMcpConfig> {
   const serializedConfig = `${JSON.stringify(params.mergedConfig, null, 2)}\n`;
   const mcpConfigHash = crypto.createHash("sha256").update(serializedConfig).digest("hex");
@@ -358,13 +366,15 @@ async function prepareModeSpecificBundleMcpConfig(params: {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-cli-mcp-"));
   const mcpConfigPath = path.join(tempDir, "mcp.json");
   await fs.writeFile(mcpConfigPath, serializedConfig, "utf-8");
+  const strict = params.strict ?? true;
   return {
     backend: {
       ...params.backend,
-      args: injectClaudeMcpConfigArgs(params.backend.args, mcpConfigPath),
+      args: injectClaudeMcpConfigArgs(params.backend.args, mcpConfigPath, strict),
       resumeArgs: injectClaudeMcpConfigArgs(
         params.backend.resumeArgs ?? params.backend.args ?? [],
         mcpConfigPath,
+        strict,
       ),
     },
     mcpConfigHash,
@@ -385,6 +395,7 @@ export async function prepareCliBundleMcpConfig(params: {
   additionalConfig?: BundleMcpConfig;
   env?: Record<string, string>;
   warn?: (message: string) => void;
+  strict?: boolean;
 }): Promise<PreparedCliBundleMcpConfig> {
   if (!params.enabled) {
     return { backend: params.backend, env: params.env };
@@ -424,5 +435,6 @@ export async function prepareCliBundleMcpConfig(params: {
     backend: params.backend,
     mergedConfig,
     env: params.env,
+    strict: params.strict,
   });
 }

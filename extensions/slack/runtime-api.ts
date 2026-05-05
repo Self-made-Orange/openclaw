@@ -4,4 +4,5 @@ export * from "./src/index.js";
 export * from "./src/resolve-channels.js";
 export * from "./src/resolve-users.js";
 export { registerSlackPluginHttpRoutes } from "./src/http/plugin-routes.js";
+export { registerSlackTools } from "./src/tools/index.js";
 export { setSlackRuntime } from "./src/runtime.js";
