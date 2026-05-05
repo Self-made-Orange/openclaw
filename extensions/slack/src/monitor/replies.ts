@@ -303,46 +303,57 @@ export async function deliverReplies(params: {
         )
           ? (payload as { metadata: { toolCallNames: string[] } }).metadata.toolCallNames
           : undefined;
-        try {
-          const verdict = await callReviewer({
-            agentId: extractAgentIdFromPayload(payload),
-            isChannelRoot: !threadTs,
-            draftReply,
-            toolCallNames,
-          });
+        // self-improve agent has the user (Claude Code CLI) as a deployment-gate
+        // reviewer at the branch-merge step — runtime reviewer here only adds
+        // a noisy footer to bot replies that the user already reviews via
+        // `git diff main...<branch>`. Skip to keep self-improve channel clean.
+        // TODO: replace hardcoded check with per-agent `reviewer: "off"` config.
+        const reviewerAgentId = extractAgentIdFromPayload(payload);
+        if (reviewerAgentId === "self-improve") {
           params.runtime.log?.(
-            `[claw-debug] reviewer: verdict=${verdict.verdict} reason="${verdict.reason}" ${verdict.durationMs}ms${verdict.fellBack ? " (fallback)" : ""}`,
+            "[claw-debug] reviewer: skipped for self-improve agent (user is the deployment-gate reviewer)",
           );
-          if (verdict.verdict === "reject") {
-            // Filter (not gate). Per Joon 2026-05-03 19:57: full-block reject
-            // is data-loss for the user. Pattern instead: SHIP the answer +
-            // append a small footer + record reject for later prompt iteration.
-            recordReviewerReject({
-              ts: new Date().toISOString(),
-              agentId: extractAgentIdFromPayload(payload),
+        } else
+          try {
+            const verdict = await callReviewer({
+              agentId: reviewerAgentId,
+              isChannelRoot: !threadTs,
               draftReply,
-              reason: verdict.reason,
-              durationMs: verdict.durationMs,
+              toolCallNames,
             });
-            const footer = `\n\n_⚠️ reviewer: ${verdict.reason.slice(0, 200)}_`;
-            const mut = payload as { text?: string };
-            if (typeof mut.text === "string" && mut.text) {
-              mut.text = `${mut.text}${footer}`;
-            } else {
-              mut.text = `${draftReply}${footer}`;
-            }
-            // Re-resolve so reply.trimmedText / hasContent reflect the
-            // footer-suffixed body for the downstream send branches.
-            reply = resolveSendableOutboundReplyParts(payload);
             params.runtime.log?.(
-              `[claw-debug] reviewer: appended reject footer (${verdict.reason.slice(0, 60)}) — proceeding with send`,
+              `[claw-debug] reviewer: verdict=${verdict.verdict} reason="${verdict.reason}" ${verdict.durationMs}ms${verdict.fellBack ? " (fallback)" : ""}`,
             );
+            if (verdict.verdict === "reject") {
+              // Filter (not gate). Per Joon 2026-05-03 19:57: full-block reject
+              // is data-loss for the user. Pattern instead: SHIP the answer +
+              // append a small footer + record reject for later prompt iteration.
+              recordReviewerReject({
+                ts: new Date().toISOString(),
+                agentId: extractAgentIdFromPayload(payload),
+                draftReply,
+                reason: verdict.reason,
+                durationMs: verdict.durationMs,
+              });
+              const footer = `\n\n_⚠️ reviewer: ${verdict.reason.slice(0, 200)}_`;
+              const mut = payload as { text?: string };
+              if (typeof mut.text === "string" && mut.text) {
+                mut.text = `${mut.text}${footer}`;
+              } else {
+                mut.text = `${draftReply}${footer}`;
+              }
+              // Re-resolve so reply.trimmedText / hasContent reflect the
+              // footer-suffixed body for the downstream send branches.
+              reply = resolveSendableOutboundReplyParts(payload);
+              params.runtime.log?.(
+                `[claw-debug] reviewer: appended reject footer (${verdict.reason.slice(0, 60)}) — proceeding with send`,
+              );
+            }
+          } catch {
+            // Reviewer threw outside its own fail-safe (shouldn't happen) —
+            // proceed with normal send to avoid blocking on a broken side-channel.
+            params.runtime.log?.("[claw-debug] reviewer: unexpected throw; proceeding with send");
           }
-        } catch {
-          // Reviewer threw outside its own fail-safe (shouldn't happen) —
-          // proceed with normal send to avoid blocking on a broken side-channel.
-          params.runtime.log?.("[claw-debug] reviewer: unexpected throw; proceeding with send");
-        }
       }
     }
 
