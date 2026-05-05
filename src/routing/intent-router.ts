@@ -56,6 +56,15 @@ type StickyThreadEntry = {
 };
 const stickyThreadMap = new Map<string, StickyThreadEntry>();
 
+// Parent-agent map: maps a delivered bot reply's message ts → agentId so a
+// new thread started on top of that reply inherits the parent agent before
+// classifier runs. Closes the gap where intent classifier silently rerouted
+// thread-first messages away from the agent that produced the parent reply.
+// NOTE: In-process memory only — evaporates on gateway restart. Same policy
+// as stickyThreadMap.
+// TODO: LRU(maxSize=1000) or TTL — handle alongside sticky cleanup.
+const parentAgentMap = new Map<string, string>();
+
 function pruneExpired(now: number): void {
   for (const [k, v] of cache) {
     if (v.expiresAt <= now) cache.delete(k);
@@ -391,9 +400,41 @@ export function checkStickyThreadAgent(threadKey: string): IntentRouterDecision 
   };
 }
 
+/**
+ * Record the agentId that produced a delivered bot reply, keyed by the Slack
+ * message ts. Used by checkParentAgent() so threads opened on this reply
+ * inherit the parent agent.
+ */
+export function recordBotReplyAgent(messageTs: string, agentId: string): void {
+  if (!messageTs || !agentId) return;
+  parentAgentMap.set(messageTs, agentId);
+}
+
+/**
+ * Return an inherited routing decision for a thread whose parent message ts
+ * matches a previously recorded bot reply. Used as the fallback between
+ * thread-sticky and keyword classifier in dispatch-from-config.
+ *
+ * NOTE: evaporates on gateway restart.
+ */
+export function checkParentAgent(parentMessageTs: string): IntentRouterDecision | undefined {
+  if (!parentMessageTs) return undefined;
+  const agentId = parentAgentMap.get(parentMessageTs);
+  if (!agentId) return undefined;
+  // Grep-friendly: [intent-router] thread-inherit:<agentId> from parent <ts>
+  log.debug(`thread-inherit:${agentId} from parent ${parentMessageTs}`);
+  return {
+    agentId,
+    reason: `thread-inherit from parent ${parentMessageTs}`,
+    cached: false,
+    fellBack: false,
+  };
+}
+
 // Test-only escape hatch. Not exported from package index — only the test file imports it.
 export function __resetIntentRouterCacheForTesting(): void {
   cache.clear();
   inflight.clear();
   stickyThreadMap.clear();
+  parentAgentMap.clear();
 }

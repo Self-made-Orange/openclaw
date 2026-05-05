@@ -14,6 +14,14 @@ import {
 } from "openclaw/plugin-sdk/reply-payload";
 import { createReplyReferencePlanner } from "openclaw/plugin-sdk/reply-reference";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
+// CLAW-FORK 2026-05-03 (Phase 6, multi-agent): reviewer agent call.
+// Filter pattern (per Kimi 2026-05-03 19:03 design feedback + Joon
+// 19:57 follow-up): reject NEVER blocks the send — answer ships, reject
+// reason is appended as a footer + recorded to reviewer-rejects.jsonl
+// for later prompt iteration. False-positive cost (user sees a footer
+// that doesn't apply) is tiny vs the data-loss cost of withholding the
+// whole reply.
+import { recordBotReplyAgent } from "../../../../src/routing/intent-router.js";
 import { markdownToSlackMrkdwnChunks } from "../format.js";
 import { SLACK_TEXT_LIMIT } from "../limits.js";
 import { resolveSlackReplyBlocks } from "../reply-blocks.js";
@@ -22,13 +30,6 @@ import {
   buildTunnelUrl,
   ensureOutputStaticServer,
 } from "./output-static-server.js";
-// CLAW-FORK 2026-05-03 (Phase 6, multi-agent): reviewer agent call.
-// Filter pattern (per Kimi 2026-05-03 19:03 design feedback + Joon
-// 19:57 follow-up): reject NEVER blocks the send — answer ships, reject
-// reason is appended as a footer + recorded to reviewer-rejects.jsonl
-// for later prompt iteration. False-positive cost (user sees a footer
-// that doesn't apply) is tiny vs the data-loss cost of withholding the
-// whole reply.
 import { callReviewer, recordReviewerReject } from "./reviewer-call.js";
 import { sendMessageSlack, type SlackSendIdentity } from "./send.runtime.js";
 
@@ -505,7 +506,7 @@ export async function deliverReplies(params: {
         isThreadReply: Boolean(threadTs),
       });
       // (Reviewer hook fires once at the top of the for-loop — D3.5.)
-      await sendMessageSlack(params.target, mentioned.text, {
+      const resp = await sendMessageSlack(params.target, mentioned.text, {
         cfg: params.cfg,
         token: params.token,
         threadTs,
@@ -514,6 +515,13 @@ export async function deliverReplies(params: {
         ...(params.identity ? { identity: params.identity } : {}),
       });
       params.runtime.log?.(`delivered reply to ${params.target}`);
+      // Thread-inherit: record agentId for channel-root replies so a thread
+      // started on this reply inherits this agent before classifier runs.
+      // Skip thread replies (they cannot be a thread parent in Slack).
+      if (!threadTs && resp?.messageId) {
+        const agentIdForRecord = extractAgentIdFromPayload(payload);
+        if (agentIdForRecord) recordBotReplyAgent(resp.messageId, agentIdForRecord);
+      }
       continue;
     }
 
@@ -682,6 +690,11 @@ export async function deliverReplies(params: {
         params.runtime.log?.(
           `[claw-debug] delivered reply (blocks+actions, text-suppressed) to ${params.target} ts=${firstMessageTs} summarySuppressed=${trimmedSummary?.length ?? 0}chars`,
         );
+        // Thread-inherit: record agentId for channel-root replies (skip thread replies).
+        if (!threadTs && firstMessageTs) {
+          const agentIdForRecord = extractAgentIdFromPayload(payload);
+          if (agentIdForRecord) recordBotReplyAgent(firstMessageTs, agentIdForRecord);
+        }
       }
 
       // ② 파일을 thread 안에 caption 으로 송출.
