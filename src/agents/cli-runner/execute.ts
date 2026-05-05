@@ -195,9 +195,7 @@ export async function executePreparedCliRun(
   // Every turn now starts as a fresh session until upstream compatibility is fixed.
   const useResume =
     false &&
-    Boolean(
-      cliSessionIdToUse && resolvedSessionId && backend.resumeArgs && backend.resumeArgs.length > 0,
-    );
+    Boolean(cliSessionIdToUse && resolvedSessionId && (backend.resumeArgs?.length ?? 0) > 0);
   const systemPromptArg = resolveSystemPromptUsage({
     backend,
     isNewSession: isNew,

@@ -826,7 +826,6 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
 
     const matched = tier.candidates.find(
       (candidate) =>
-        candidate.binding.type !== "intent" &&
         tier.predicate(candidate) &&
         matchesBindingScope(candidate.match, {
           ...baseScope,

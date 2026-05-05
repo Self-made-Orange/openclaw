@@ -376,7 +376,10 @@ export function normalizeReplyPayloadDirectives(params: {
     const extracted = extractClawInteractive(text);
     text = extracted.text || undefined;
     if (!interactive && extracted.interactive) {
-      interactive = extracted.interactive;
+      // ClawInteractive button.style is `string` (loose); InteractiveReply expects
+      // the strict InteractiveButtonStyle enum. Runtime validators downstream
+      // already coerce/validate, so the cast here is safe.
+      interactive = extracted.interactive as unknown as typeof interactive;
     }
     if (extracted.rawSlackBlocks && extracted.rawSlackBlocks.length > 0) {
       injectedRawSlackBlocks = extracted.rawSlackBlocks;
