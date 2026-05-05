@@ -68,7 +68,11 @@ import {
 } from "../../tts/tts-config.js";
 import { INTERNAL_MESSAGE_CHANNEL, normalizeMessageChannel } from "../../utils/message-channel.js";
 import type { BlockReplyContext } from "../get-reply-options.types.js";
-import { getReplyPayloadMetadata, type ReplyPayload } from "../reply-payload.js";
+import {
+  getReplyPayloadMetadata,
+  setReplyPayloadMetadata,
+  type ReplyPayload,
+} from "../reply-payload.js";
 import type { FinalizedMsgContext } from "../templating.js";
 import { normalizeVerboseLevel } from "../thinking.js";
 import {
@@ -1061,6 +1065,20 @@ export async function dispatchReplyFromConfig(
     const onPlanUpdateFromReplyOptions = params.replyOptions?.onPlanUpdate;
     const onApprovalEventFromReplyOptions = params.replyOptions?.onApprovalEvent;
     const onPatchSummaryFromReplyOptions = params.replyOptions?.onPatchSummary;
+    const onToolStartFromReplyOptions = params.replyOptions?.onToolStart;
+    // CLAW-FORK 2026-05-06: accumulate tool call names this turn so the final
+    // reply payload metadata can carry them — reviewer/audit hooks need to know
+    // what tools ran when judging draft replies (e.g. MEDIA directive present
+    // but no Write/Bash call = suspicious).
+    const turnToolCallNames: string[] = [];
+    const turnToolCallNamesSeen = new Set<string>();
+    const recordTurnToolCall = (name: string | undefined): void => {
+      if (!name) return;
+      const trimmed = name.trim();
+      if (!trimmed || turnToolCallNamesSeen.has(trimmed)) return;
+      turnToolCallNamesSeen.add(trimmed);
+      turnToolCallNames.push(trimmed);
+    };
 
     const replyResolver =
       params.replyResolver ?? (await loadGetReplyFromConfigRuntime()).getReplyFromConfig;
@@ -1143,6 +1161,10 @@ export async function dispatchReplyFromConfig(
             return;
           }
           await maybeSendWorkingStatus(label);
+        },
+        onToolStart: async (payload) => {
+          recordTurnToolCall(payload.name);
+          await onToolStartFromReplyOptions?.(payload);
         },
         onBlockReply: (payload: ReplyPayload, context?: BlockReplyContext) => {
           const run = async () => {
@@ -1239,6 +1261,19 @@ export async function dispatchReplyFromConfig(
     }
 
     const replies = replyResult ? (Array.isArray(replyResult) ? replyResult : [replyResult]) : [];
+
+    // CLAW-FORK 2026-05-06: stamp tool-call provenance onto final reply payloads
+    // so the slack reviewer hook (and any future audit consumer) can see what
+    // tools the agent actually used when judging the draft. Without this, the
+    // reviewer always saw "(none)" and falsely rejected MEDIA replies whose
+    // file was, in fact, just written by Bash/Write.
+    if (turnToolCallNames.length > 0) {
+      for (const reply of replies) {
+        const existing = getReplyPayloadMetadata(reply)?.toolCallNames ?? [];
+        if (existing.length > 0) continue;
+        setReplyPayloadMetadata(reply, { toolCallNames: turnToolCallNames });
+      }
+    }
 
     let queuedFinal = false;
     let routedFinalCount = 0;
