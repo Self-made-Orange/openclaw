@@ -8,12 +8,22 @@ import type { SlackMonitorContext } from "../context.js";
 import type { SlackReactionEvent } from "../types.js";
 import { authorizeAndResolveSlackSystemEventContext } from "./system-event-context.js";
 
-// CLAW-FORK: `:+1:` / `:thumbsup:` 는 silent positive 로깅만 — LLM agent run
-// 발화 안 하고 fast-path 으로 직접 wiki/_format-feedback/positive.md 에 append.
-// 이유: positive feedback 은 응답 송출 없음 (silent logging) 이라서 agent 한테
-// 맡기면 wake → heartbeat → kimi run (수십초 + 토큰) 만 낭비. 직접 파일 I/O 가
-// 0 latency + 0 토큰. 구조 분석은 나중 §synth 패스에서 batch.
-const POSITIVE_EMOJI = new Set(["+1", "thumbsup"]);
+// CLAW-FORK: positive emoji aliases — silent logging fast-path.
+// `:+1:` / `:thumbsup:` (👍) — 표준 thumbs up
+// `:white_check_mark:` (✅) — "확인" / "동의" / "approved" 의미로 흔히 쓰임
+// `:heavy_check_mark:` (✔) — 같은 ✓ 계열
+// `:ok_hand:` (👌) — 한국어권에서 thumbs up 대체로 자주 사용
+// `:heart:` (❤️) — strong positive 시그널
+// LLM agent run 발화 안 하고 fast-path 으로 직접
+// wiki/_format-feedback/positive.md 에 append. 0 latency + 0 토큰.
+const POSITIVE_EMOJI = new Set([
+  "+1",
+  "thumbsup",
+  "white_check_mark",
+  "heavy_check_mark",
+  "ok_hand",
+  "heart",
+]);
 
 async function fastLogPositiveReaction(params: {
   channelLabel: string;
