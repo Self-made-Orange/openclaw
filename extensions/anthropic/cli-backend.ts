@@ -46,7 +46,7 @@ export function buildAnthropicCliBackend(): CliBackendPlugin {
         "--setting-sources",
         "user",
         "--allowedTools",
-        "mcp__openclaw__* mcp__claude_ai_*",
+        "mcp__openclaw__* mcp__claude_ai_* mcp__gmail__*",
       ],
       resumeArgs: [
         "-p",
@@ -57,7 +57,7 @@ export function buildAnthropicCliBackend(): CliBackendPlugin {
         "--setting-sources",
         "user",
         "--allowedTools",
-        "mcp__openclaw__* mcp__claude_ai_*",
+        "mcp__openclaw__* mcp__claude_ai_* mcp__gmail__*",
         "--resume",
         "{sessionId}",
       ],
