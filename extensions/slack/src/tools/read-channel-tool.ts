@@ -81,6 +81,7 @@ export function registerSlackReadChannelTool(api: OpenClawPluginApi): void {
         try {
           const p = params as SlackReadChannelParams;
           let resolvedAccountId: string | undefined;
+          // CLAW-FORK: prefer accounts that explicitly list this channel.
           for (const accountId of accountIds) {
             const merged = mergeSlackAccountConfig(api.config!, accountId);
             const channels = merged.channels ?? {};
@@ -89,11 +90,33 @@ export function registerSlackReadChannelTool(api: OpenClawPluginApi): void {
               break;
             }
           }
+          // CLAW-FORK 2026-05-09: fallback for accounts with NO channels config
+          // (e.g. default bot listening to all channels via top-level botToken).
+          // Symptom we hit: master-clawAgentv2 receives a thread mention in
+          // #a-research (C0ATZBA2EKX), follows AGENTS.md universal "Thread context
+          // read" rule and calls slack_read_channel(channelId, threadTs) — but the
+          // tool refused because no account explicitly listed C0ATZBA2EKX. The
+          // bot CAN read the channel (Slack-side ACL via xoxb scopes); the
+          // gateway-config gate was too strict. Fall back to the first account
+          // whose channels config is empty/null (= "any channel allowed"). The
+          // Slack API itself still enforces channel ACL via the xoxb token, so
+          // this is safe.
+          if (!resolvedAccountId) {
+            for (const accountId of accountIds) {
+              const merged = mergeSlackAccountConfig(api.config!, accountId);
+              const channels = merged.channels;
+              if (!channels || Object.keys(channels).length === 0) {
+                resolvedAccountId = accountId;
+                break;
+              }
+            }
+          }
           if (!resolvedAccountId) {
             return jsonResult({
               error:
-                "No Slack account in this gateway has the requested channelId in its channels config. " +
-                `channelId=${p.channelId}.`,
+                "No Slack account in this gateway can read the requested channelId. " +
+                "Either list it in an account's `channels` config, or leave one " +
+                `account's channels empty for fallback. channelId=${p.channelId}.`,
             });
           }
           const result = await readSlackMessages(p.channelId, {
