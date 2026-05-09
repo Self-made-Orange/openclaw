@@ -2,6 +2,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import { resolveDefaultSlackAccountId, resolveSlackAccount } from "./accounts.js";
+import { extractClawInteractiveFence } from "./extract-claw-fence.js";
 
 const SLACK_BUTTON_MAX_ITEMS = 5;
 const SLACK_SELECT_MAX_ITEMS = 100;
@@ -174,6 +175,35 @@ export function isSlackInteractiveRepliesEnabled(params: {
 }
 
 export function compileSlackInteractiveReplies(payload: ReplyPayload): ReplyPayload {
+  // CLAW-FORK 2026-05-09: lift RAW Slack Block Kit out of any
+  // ```openclaw-interactive``` fence in payload.text BEFORE the directive pass.
+  // Reply path strips this earlier (reply-delivery.extractClawInteractive) so
+  // this is a no-op there. Some delivery paths (e.g. cron announce direct
+  // delivery via outbound.base) flow through here. Cron announce
+  // attachedResults.sendText bypasses normalizePayload entirely — that path is
+  // covered separately inside sendMessageSlack (see send.ts).
+  if (payload.text) {
+    const fence = extractClawInteractiveFence(payload.text);
+    if (fence.rawBlocks.length > 0) {
+      const existingSlack =
+        (payload.channelData?.slack as Record<string, unknown> | undefined) ?? {};
+      const existingBlocks = Array.isArray(existingSlack.blocks)
+        ? (existingSlack.blocks as unknown[])
+        : [];
+      payload = {
+        ...payload,
+        text: fence.text || undefined,
+        channelData: {
+          ...payload.channelData,
+          slack: {
+            ...existingSlack,
+            blocks: [...existingBlocks, ...fence.rawBlocks],
+          },
+        },
+      };
+    }
+  }
+
   const text = payload.text;
   if (!text) {
     return payload;

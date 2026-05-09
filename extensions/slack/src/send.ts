@@ -20,6 +20,7 @@ import { resolveSlackAccount } from "./accounts.js";
 import { buildSlackBlocksFallbackText } from "./blocks-fallback.js";
 import { validateSlackBlocksArray } from "./blocks-input.js";
 import { createSlackWriteClient } from "./client.js";
+import { extractClawInteractiveFence } from "./extract-claw-fence.js";
 import { markdownToSlackMrkdwnChunks } from "./format.js";
 import { SLACK_TEXT_LIMIT } from "./limits.js";
 import { loadOutboundMediaFromUrl } from "./runtime-api.js";
@@ -333,9 +334,27 @@ async function uploadSlackFile(params: {
 
 export async function sendMessageSlack(
   to: string,
-  message: string,
-  opts: SlackSendOpts,
+  initialMessage: string,
+  initialOpts: SlackSendOpts,
 ): Promise<SlackSendResult> {
+  // CLAW-FORK 2026-05-10: Lift Block Kit out of `<openclaw-interactive>` fence
+  // INSIDE the message text. The outbound adapter's normalizePayload pass
+  // already handles this for some paths, but cron --announce delivery routes
+  // through `outbound.attachedResults.sendText` (channel.ts) which calls
+  // sendMessageSlack directly — bypassing normalizePayload. Putting the
+  // extraction here makes the fence work for every path (cron, reply, etc).
+  let message = initialMessage;
+  let opts: SlackSendOpts = initialOpts;
+  if (message && !opts.blocks) {
+    const fence = extractClawInteractiveFence(message);
+    if (fence.rawBlocks.length > 0) {
+      message = fence.text || "";
+      opts = {
+        ...opts,
+        blocks: fence.rawBlocks as (Block | KnownBlock)[],
+      };
+    }
+  }
   const trimmedMessage = normalizeOptionalString(message) ?? "";
   if (isSilentReplyText(trimmedMessage) && !opts.mediaUrl && !opts.blocks) {
     logVerbose("slack send: suppressed NO_REPLY token before API call");
