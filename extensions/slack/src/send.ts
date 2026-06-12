@@ -49,6 +49,70 @@ const SLACK_DNS_RETRY_BASE_DELAY_MS = 250;
 const slackDmChannelCache = new Map<string, string>();
 const slackSendQueues = new Map<string, Promise<void>>();
 
+// CLAW-FORK 2026-05-11: workspace allowlist guard.
+// After 2026-05-10 vespexx leak (claude.ai user-identity OAuth posted as user
+// into the wrong workspace), every Slack send is gated on the destination
+// channel's team_id matching the allowlist. Even if all upstream guards
+// (memory rules, SYSTEM.md, tools.deny) are bypassed or reset, this hard
+// runtime check stops the send. The check fails closed: if team_id cannot
+// be resolved, the send is aborted.
+//
+// To allow additional teams, set SLACK_ALLOWED_TEAM_IDS env var (CSV) or
+// extend SLACK_ALLOWED_TEAM_IDS_DEFAULT here. Empty env var = use defaults.
+const SLACK_ALLOWED_TEAM_IDS_DEFAULT = ["T08LPC2RSG5"]; // Self-made-orange
+const slackChannelTeamCache = new Map<string, string>();
+
+function getSlackAllowedTeamIds(): string[] {
+  const env = process.env.SLACK_ALLOWED_TEAM_IDS;
+  if (env && env.trim()) {
+    return env
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return SLACK_ALLOWED_TEAM_IDS_DEFAULT;
+}
+
+async function assertSlackChannelTeamAllowed(client: WebClient, channelId: string): Promise<void> {
+  const allowed = getSlackAllowedTeamIds();
+  let teamId = slackChannelTeamCache.get(channelId);
+  if (!teamId) {
+    let infoErr: unknown = undefined;
+    try {
+      const info = await client.conversations.info({ channel: channelId });
+      const ch = info.channel as
+        | {
+            context_team_id?: string;
+            shared_team_ids?: readonly string[];
+          }
+        | undefined;
+      teamId =
+        ch?.context_team_id ??
+        (Array.isArray(ch?.shared_team_ids) ? ch?.shared_team_ids[0] : undefined) ??
+        "";
+      if (teamId) {
+        slackChannelTeamCache.set(channelId, teamId);
+      }
+    } catch (err) {
+      infoErr = err;
+    }
+    if (!teamId) {
+      throw new Error(
+        `Slack send blocked: cannot verify team_id for channel ${channelId}` +
+          (infoErr ? ` (conversations.info error: ${(infoErr as Error).message})` : "") +
+          `. Workspace allowlist guard requires team verification — failing closed to prevent cross-workspace leak.`,
+      );
+    }
+  }
+  if (!allowed.includes(teamId)) {
+    throw new Error(
+      `Slack send blocked: channel ${channelId} is in team_id ${teamId}, ` +
+        `which is not in ALLOWED_TEAM_IDS (${allowed.join(", ")}). ` +
+        `If this is intentional, add the team_id to SLACK_ALLOWED_TEAM_IDS env var or SLACK_ALLOWED_TEAM_IDS_DEFAULT in extensions/slack/src/send.ts.`,
+    );
+  }
+}
+
 type SlackRecipient =
   | {
       kind: "user";
@@ -716,6 +780,8 @@ async function sendMessageSlackQueuedInner(params: {
         accountId: account.accountId,
         token,
       });
+  // CLAW-FORK 2026-05-11: workspace allowlist guard — see top of file for rationale.
+  await assertSlackChannelTeamAllowed(client, channelId);
   if (blocks) {
     if (opts.mediaUrl) {
       throw new Error("Slack send does not support blocks with mediaUrl");
