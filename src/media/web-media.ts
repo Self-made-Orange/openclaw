@@ -182,6 +182,72 @@ const HOST_READ_TEXT_PLAIN_EXTENSION_BY_MIME: Record<string, readonly string[]> 
 };
 const MB = 1024 * 1024;
 
+// CLAW-FORK: explicit opt-in for sending HTML artifacts as host-local media.
+// Slack will accept these as plain attachments; we only reject if the buffer
+// contains script-execution surfaces that could escape sandboxing in any
+// downstream renderer. Tighter than DOMPurify but pattern-based — meant for
+// agent-generated reports/dashboards where there is no legitimate need for
+// active content.
+const HOST_READ_ALLOWED_HTML_MIMES = new Set(["text/html", "application/xhtml+xml"]);
+const HOST_READ_HTML_MAX_BYTES = 5 * MB;
+const HTML_SAFETY_DANGER_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
+  { name: "script-tag", re: /<script\b[^>]*>/i },
+  { name: "inline-event-handler", re: /\son[a-z]+\s*=\s*["'`]?[^"'`\s>]/i },
+  { name: "javascript-url", re: /\bjavascript:/i },
+  { name: "iframe-tag", re: /<iframe\b/i },
+  { name: "object-tag", re: /<object\b/i },
+  { name: "embed-tag", re: /<embed\b/i },
+  { name: "html-import", re: /<link\s[^>]*rel\s*=\s*["']?import\b/i },
+  { name: "data-html-uri", re: /\bdata:text\/html\b/i },
+  { name: "meta-refresh", re: /<meta[^>]+http-equiv\s*=\s*["']?refresh\b/i },
+  { name: "form-tag", re: /<form\b/i },
+];
+
+// CLAW-FORK: outprint-rendered HTML signature. Allows pan/zoom + Chart.js
+// scripts that outprint-render injects, since these come from a trusted
+// local pipeline (envelope.json → schema-validated → render.mjs) and not
+// from arbitrary agent text. Detected via the renderer's distinctive
+// `data-theme=` root attribute paired with the inline pan/zoom comment.
+//
+// 2026-05-03: outprint v2 trim — canvas always emits `data-theme="shadcn-dark"`
+// (or `shadcn-light` after toggle) on root. Brand themes (notion/linear/...)
+// load as additional CSS but the root attribute remains shadcn-{light,dark}.
+const OUTPRINT_HTML_SIGNATURE_RE =
+  /<html[^>]*\sdata-theme\s*=\s*["'](?:shadcn-light|shadcn-dark|notion|linear|vercel|stripe|supabase)["']/i;
+const OUTPRINT_INTERACTIVE_LAYER_MARKER = "Outprint interactive layer";
+
+function isOutprintRenderedHtml(text: string): boolean {
+  return OUTPRINT_HTML_SIGNATURE_RE.test(text) && text.includes(OUTPRINT_INTERACTIVE_LAYER_MARKER);
+}
+
+function validateHostReadHtmlSafety(buffer: Buffer): void {
+  if (buffer.length === 0) {
+    throw new LocalMediaAccessError("path-not-allowed", "HTML media safety filter: empty buffer.");
+  }
+  if (buffer.length > HOST_READ_HTML_MAX_BYTES) {
+    throw new LocalMediaAccessError(
+      "path-not-allowed",
+      `HTML media exceeds safety inspection limit (${HOST_READ_HTML_MAX_BYTES} bytes).`,
+    );
+  }
+  const text = buffer.toString("utf-8");
+  // CLAW-FORK: bypass danger-pattern filter for outprint-rendered HTML.
+  // The renderer is a trusted local pipeline whose scripts (pan/zoom, Chart.js)
+  // are catalog-bounded and don't execute arbitrary agent intent.
+  if (isOutprintRenderedHtml(text)) {
+    return;
+  }
+  for (const { name, re } of HTML_SAFETY_DANGER_PATTERNS) {
+    const match = text.match(re);
+    if (match) {
+      throw new LocalMediaAccessError(
+        "path-not-allowed",
+        `HTML media rejected by safety filter (${name}): ${match[0].slice(0, 80)}`,
+      );
+    }
+  }
+}
+
 function stripLegacyMediaDirectivePrefix(mediaUrl: string): string {
   if (/^\s*media:\/\//i.test(mediaUrl)) {
     return mediaUrl;
@@ -391,6 +457,13 @@ function assertHostReadMediaAllowed(params: {
     ) {
       return;
     }
+    // CLAW-FORK: HTML media exception — declared HTML that fails the upstream
+    // trusted-tmp-path check may still pass when the buffer clears the
+    // danger-pattern safety filter (or carries the outprint signature).
+    if (declaredMime === "text/html" && params.buffer) {
+      validateHostReadHtmlSafety(params.buffer);
+      return;
+    }
     throw new LocalMediaAccessError("path-not-allowed", HOST_READ_DECLARED_TEXT_ERROR);
   }
   const sniffedKind = kindFromMime(params.sniffedContentType);
@@ -424,6 +497,24 @@ function assertHostReadMediaAllowed(params: {
     isValidatedHostReadText(params.buffer)
   ) {
     return;
+  }
+  // CLAW-FORK: HTML media exception — allow when declared/sniffed mime is HTML
+  // and the buffer passes the safety filter (no script-execution surfaces).
+  {
+    const htmlCandidate =
+      (sniffedMime && HOST_READ_ALLOWED_HTML_MIMES.has(sniffedMime)) ||
+      (normalizedMime && HOST_READ_ALLOWED_HTML_MIMES.has(normalizedMime)) ||
+      (declaredMime && HOST_READ_ALLOWED_HTML_MIMES.has(declaredMime));
+    if (htmlCandidate) {
+      if (!params.buffer) {
+        throw new LocalMediaAccessError(
+          "path-not-allowed",
+          "HTML media requires buffer for safety validation.",
+        );
+      }
+      validateHostReadHtmlSafety(params.buffer);
+      return;
+    }
   }
   if (
     params.kind === "document" &&
@@ -1000,6 +1091,20 @@ async function loadWebMediaInternal(
   if (workspaceDir && !path.isAbsolute(mediaUrl) && !WINDOWS_DRIVE_RE.test(mediaUrl)) {
     mediaUrl = path.resolve(workspaceDir, mediaUrl);
   }
+  // CLAW-FORK: textually normalize absolute paths so that "/foo/symlink/../bar"
+  // resolves to "/foo/bar" instead of going through kernel symlink resolution
+  // (which would chase the symlink target's parent and find nothing). The agent
+  // workspace `~/openclaw-ws` is a symlink to the vault repo; without this
+  // normalization, MEDIA paths emitted by the model as `/home/.../openclaw-ws/../output/foo.html`
+  // statSync to the wrong place. Verified 2026-04-26 with a Clipdoggy archive
+  // upload that wrote to `/home/.../output/foo.html` but stat resolved to
+  // `/mnt/c/.../obsidian-agent-vault/output/foo.html` and failed.
+  if (path.isAbsolute(mediaUrl) && mediaUrl.includes("/..")) {
+    const normalized = path.resolve(mediaUrl);
+    if (normalized !== mediaUrl) {
+      mediaUrl = normalized;
+    }
+  }
   try {
     assertNoWindowsNetworkPath(mediaUrl, "Local media path");
   } catch (err) {
@@ -1027,9 +1132,10 @@ async function loadWebMediaInternal(
     hostReadDeclaredMime === "text/html"
       ? await isTrustedGeneratedHostReadHtmlPath(mediaUrl)
       : false;
-  if (hostReadDeclaredMime === "text/html" && !trustedGeneratedHtmlPath) {
-    throw new LocalMediaAccessError("path-not-allowed", HOST_READ_DECLARED_TEXT_ERROR);
-  }
+  // CLAW-FORK: upstream rejects declared text/html outside the trusted tmp dir
+  // before reading the file. We instead defer to the buffer-based safety filter
+  // in assertHostReadMediaAllowed (danger-pattern scan + outprint allowlist),
+  // so untrusted-path HTML is still validated, just on content not location.
 
   // Local path
   let data: Buffer;
