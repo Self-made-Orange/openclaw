@@ -18,6 +18,9 @@ import { isSlackApprovalAuthorizedSender } from "../../approval-auth.js";
 import { isSlackExecApprovalAuthorizedSender } from "../../exec-approvals.js";
 import { dispatchSlackPluginInteractiveHandler } from "../../interactive-dispatch.js";
 import {
+  SLACK_FEEDBACK_BAD_ACTION_ID,
+  SLACK_FEEDBACK_GOOD_ACTION_ID,
+  SLACK_FEEDBACK_UNDO_ACTION_ID,
   SLACK_REPLY_BUTTON_ACTION_ID,
   SLACK_REPLY_SELECT_ACTION_ID,
 } from "../../reply-action-ids.js";
@@ -891,6 +894,23 @@ async function handleSlackBlockAction(params: {
 }): Promise<void> {
   const { ack, body, action, respond } = params.args;
   await ack();
+  // CLAW-FORK 2026-05-03: 👍/👎 button feedback REMOVED. Replaced by emoji
+  // reactions handled in monitor/events/reactions.ts → format-feedback skill.
+  // Short-circuit branches kept (no-op) so any straggler clicks from old
+  // messages don't fall through to plugin interaction dispatch and trigger
+  // an LLM run. `feedback-followup.ts` cleanup is a separate sweep.
+  const feedbackActionIdRaw = (action as { action_id?: unknown })?.action_id;
+  const feedbackActionId = typeof feedbackActionIdRaw === "string" ? feedbackActionIdRaw : "";
+  if (
+    feedbackActionId === SLACK_FEEDBACK_GOOD_ACTION_ID ||
+    feedbackActionId === SLACK_FEEDBACK_BAD_ACTION_ID ||
+    feedbackActionId === SLACK_FEEDBACK_UNDO_ACTION_ID
+  ) {
+    params.ctx.runtime.log?.(
+      `[claw-debug] feedback button click ignored (deprecated) actionId=${feedbackActionId}`,
+    );
+    return;
+  }
   if (params.ctx.shouldDropMismatchedSlackEvent?.(body)) {
     params.ctx.runtime.log?.("slack:interaction drop block action payload (mismatched app/team)");
     return;
