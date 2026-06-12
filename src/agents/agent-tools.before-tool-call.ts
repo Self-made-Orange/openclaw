@@ -59,6 +59,7 @@ import type { SkillSnapshot, SkillTelemetrySource } from "../skills/types.js";
 import { resolveSkillWorkshopToolApproval } from "../skills/workshop/policy.js";
 import { isPlainObject } from "../utils.js";
 import { adjustedParamsByToolCallId } from "./agent-tools.before-tool-call.state.js";
+import { checkHtmlTemplateGuard } from "./agent-tools.outprint-guard.js";
 import { copyChannelAgentToolMeta, getChannelAgentToolMeta } from "./channel-tools.js";
 import {
   getCodeModeExecBeforeHookMetadata,
@@ -826,6 +827,15 @@ export async function runBeforeToolCallHook(args: {
 }): Promise<HookOutcome> {
   const toolName = normalizeToolName(args.toolName || "tool");
   const params = args.params;
+
+  // Outprint envelope guard — fork patch. Runs before everything else so the
+  // block reason (with inline catalog guidance) is returned even when no
+  // plugin hooks or trusted policies are configured.
+  const htmlGuard = checkHtmlTemplateGuard(toolName, params);
+  if (htmlGuard) {
+    log.warn(`HTML template guard blocked ${toolName}: ${htmlGuard.reason.slice(0, 120)}`);
+    return { blocked: true, kind: "veto", reason: htmlGuard.reason, params };
+  }
 
   if (args.ctx?.sessionKey) {
     const { getDiagnosticSessionState, logToolLoopAction, detectToolCallLoop, recordToolCall } =
