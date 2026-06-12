@@ -52,6 +52,77 @@ export interface ResourceLoader {
   reload(): Promise<void>;
 }
 
+// CLAW-FORK 2026-05-03 (ported to v2026.6.6 base):
+// Allow a system prompt value to point to a markdown file via the prefix
+// `<file:...>` (or bare `file:...`). Tilde (`~/`) is expanded. The file is
+// read synchronously and the contents replace the directive. Cached by
+// (path + mtimeMs) so changes are picked up on file-write without a restart,
+// but unchanged paths skip disk I/O. Falls back to the original string if
+// the file is missing/unreadable so misconfig doesn't blank the prompt.
+type PromptFileCacheEntry = { mtimeMs: number; content: string };
+const promptFileCache = new Map<string, PromptFileCacheEntry>();
+
+function expandTilde(p: string): string {
+  if (!p) {
+    return p;
+  }
+  if (p === "~") {
+    return homedir();
+  }
+  if (p.startsWith("~/")) {
+    return join(homedir(), p.slice(2));
+  }
+  return p;
+}
+
+function tryResolvePromptFileDirective(value: string): string | undefined {
+  // Match `<file:...>` (preferred — distinct from prose) or bare `file:...`.
+  const angle = value.match(/^<file:([^>]+)>$/);
+  const bare = !angle && value.startsWith("file:") ? value.slice(5) : undefined;
+  const raw = angle ? angle[1] : bare;
+  if (!raw) {
+    return undefined;
+  }
+  const filePath = resolve(expandTilde(raw.trim()));
+  let stat: ReturnType<typeof statSync>;
+  try {
+    stat = statSync(filePath);
+  } catch (error) {
+    console.error(
+      chalk.yellow(
+        `Warning: system prompt <file:> target not found, falling back to raw value: ${filePath} (${String(error)})`,
+      ),
+    );
+    return undefined;
+  }
+  const cached = promptFileCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs) {
+    return cached.content;
+  }
+  try {
+    const content = readFileSync(filePath, "utf-8").trim();
+    if (content.length === 0) {
+      console.error(chalk.yellow(`Warning: system prompt <file:> file is empty: ${filePath}`));
+      return undefined;
+    }
+    promptFileCache.set(filePath, { mtimeMs: stat.mtimeMs, content });
+    return content;
+  } catch (error) {
+    console.error(
+      chalk.yellow(`Warning: system prompt <file:> read failed: ${filePath} (${String(error)})`),
+    );
+    return undefined;
+  }
+}
+
+/** Resolves a `<file:...>` directive in a prompt value, returning the original value otherwise. */
+export function materializeSystemPromptValue(value: string | undefined): string | undefined {
+  if (!value) {
+    return value;
+  }
+  return tryResolvePromptFileDirective(value) ?? value;
+}
+
 function resolvePromptInput(input: string | undefined, description: string): string | undefined {
   if (!input) {
     return undefined;
@@ -513,13 +584,15 @@ export class DefaultResourceLoader implements ResourceLoader {
       : agentsFiles;
     this.agentsFiles = resolvedAgentsFiles.agentsFiles;
 
-    const baseSystemPrompt = resolvePromptInput(
-      this.systemPromptSource ?? this.discoverSystemPromptFile(),
-      "system prompt",
+    const baseSystemPrompt = materializeSystemPromptValue(
+      resolvePromptInput(
+        this.systemPromptSource ?? this.discoverSystemPromptFile(),
+        "system prompt",
+      ),
     );
-    this.systemPrompt = this.systemPromptTransform
-      ? this.systemPromptTransform(baseSystemPrompt)
-      : baseSystemPrompt;
+    this.systemPrompt = materializeSystemPromptValue(
+      this.systemPromptTransform ? this.systemPromptTransform(baseSystemPrompt) : baseSystemPrompt,
+    );
 
     const appendSources =
       this.appendSystemPromptSource ??
