@@ -19,7 +19,6 @@ export {
   buildTtsSupplementMediaPayload,
   getReplyPayloadMetadata,
   getReplyPayloadTtsSupplement,
-  setReplyPayloadMetadata,
   isReplyPayloadNonTerminalToolErrorWarning,
   isReplyPayloadTtsSupplement,
   markReplyPayloadAsTtsSupplement,
