@@ -126,10 +126,15 @@ async function prepareModeSpecificBundleMcpConfig(params: {
   return {
     backend: {
       ...params.backend,
-      args: injectClaudeMcpConfigArgs(params.backend.args, mcpConfigPath),
+      args: injectClaudeMcpConfigArgs(
+        params.backend.args,
+        mcpConfigPath,
+        params.backend.bundleMcpStrict !== false,
+      ),
       resumeArgs: injectClaudeMcpConfigArgs(
         params.backend.resumeArgs ?? params.backend.args ?? [],
         mcpConfigPath,
+        params.backend.bundleMcpStrict !== false,
       ),
     },
     mcpConfigHash,
