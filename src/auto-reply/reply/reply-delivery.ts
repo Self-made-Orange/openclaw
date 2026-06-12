@@ -12,6 +12,225 @@ import type { TypingSignaler } from "./typing-mode.js";
 
 export type ReplyDirectiveParseMode = "always" | "auto" | "never";
 
+// CLAW-FORK: extract abstract InteractiveReply OR raw Slack Block Kit from
+// agent text. Agent emits a fenced JSON block with language tag
+// `openclaw-interactive` (or alias `openclaw-blocks`). The parser strips the
+// fence from text and routes:
+//   - blocks of type {text|buttons|select}        → payload.interactive (abstract, channel-agnostic)
+//   - blocks of richer Slack types (header/section/divider/image/context/...)
+//     → payload.channelData.slack.blocks (raw passthrough, Slack-only but full Block Kit)
+// Body forms accepted:
+//   { "blocks": [...] }
+//   { "attachments": [{ "blocks": [...], ... }] }
+const INTERACTIVE_FENCE_RE = /```openclaw-(?:interactive|blocks)\s*\n([\s\S]*?)\n```\s*/gi;
+
+// CLAW-FORK fallback: Kimi sometimes emits the dispatch *output* schema inside a
+// `json` (or untyped) fence instead of the expected `openclaw-interactive`
+// fence. We rescue these by detecting the `"type":"openclaw-interactive"`
+// signature in any fenced JSON block.
+const JSON_INTERACTIVE_FENCE_RE =
+  /```(?:json|jsonc|javascript|js)?\s*\n(\{[\s\S]*?"type"\s*:\s*"openclaw-interactive"[\s\S]*?\})\s*\n```\s*/gi;
+
+const ABSTRACT_BLOCK_TYPES = new Set(["text", "buttons", "select"]);
+
+type ClawInteractiveBlock =
+  | { type: "text"; text: string }
+  | {
+      type: "buttons";
+      buttons: Array<{ label: string; value?: string; url?: string; style?: string }>;
+    }
+  | { type: "select"; placeholder?: string; options: Array<{ label: string; value: string }> };
+
+type ClawInteractive = { blocks: ClawInteractiveBlock[] };
+
+function sanitizeClawButtonUrl(url: unknown): string | undefined {
+  if (typeof url !== "string") return undefined;
+  return /^https?:\/\//i.test(url) ? url : undefined;
+}
+
+function sanitizeClawButton(
+  raw: unknown,
+): { label: string; value?: string; url?: string; style?: string } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as { label?: unknown; value?: unknown; url?: unknown; style?: unknown };
+  if (typeof r.label !== "string") return undefined;
+  const url = sanitizeClawButtonUrl(r.url);
+  const value = typeof r.value === "string" ? r.value : undefined;
+  if (!url && !value) return undefined; // Slack rejects buttons with neither url nor value.
+  return {
+    label: r.label,
+    ...(value ? { value } : {}),
+    ...(url ? { url } : {}),
+    ...(typeof r.style === "string" ? { style: r.style } : {}),
+  };
+}
+
+function isClawInteractiveBlock(value: unknown): value is ClawInteractiveBlock {
+  if (!value || typeof value !== "object") return false;
+  const block = value as { type?: unknown };
+  if (block.type === "text") {
+    return typeof (value as { text?: unknown }).text === "string";
+  }
+  if (block.type === "buttons") {
+    const rawButtons = (value as { buttons?: unknown }).buttons;
+    if (!Array.isArray(rawButtons)) return false;
+    const sanitized = rawButtons
+      .map((b) => sanitizeClawButton(b))
+      .filter((b): b is NonNullable<typeof b> => Boolean(b));
+    if (sanitized.length === 0) return false;
+    // mutate in place so the caller sees only sanitized entries (Slack-safe).
+    (value as { buttons: typeof sanitized }).buttons = sanitized;
+    return true;
+  }
+  if (block.type === "select") {
+    const options = (value as { options?: unknown }).options;
+    return (
+      Array.isArray(options) &&
+      options.every(
+        (o) =>
+          Boolean(o) &&
+          typeof o === "object" &&
+          typeof (o as { label?: unknown }).label === "string" &&
+          typeof (o as { value?: unknown }).value === "string",
+      )
+    );
+  }
+  return false;
+}
+
+function extractFenceBlocksFromBody(body: unknown): unknown[] {
+  if (!body || typeof body !== "object") return [];
+  // CLAW-FORK: unwrap the dispatch output schema. Kimi sometimes emits
+  // `{type:"openclaw-interactive", payload:{interactive,channelData:{slack:{blocks:[...]}}}}`
+  // (the runtime output shape) instead of the expected fence body
+  // `{blocks:[...]}`. Detect and reach into payload.channelData.slack.blocks
+  // / payload.interactive.blocks transparently.
+  const wrapped = body as {
+    type?: unknown;
+    payload?: {
+      interactive?: { blocks?: unknown };
+      channelData?: { slack?: { blocks?: unknown; attachments?: unknown } };
+    };
+  };
+  if (
+    wrapped.type === "openclaw-interactive" &&
+    wrapped.payload &&
+    typeof wrapped.payload === "object"
+  ) {
+    const inner = wrapped.payload;
+    const collected: unknown[] = [];
+    const slackBlocks = inner.channelData?.slack?.blocks;
+    if (Array.isArray(slackBlocks)) {
+      collected.push(...slackBlocks);
+    }
+    const slackAttachments = inner.channelData?.slack?.attachments;
+    if (Array.isArray(slackAttachments)) {
+      for (const att of slackAttachments) {
+        if (att && typeof att === "object" && Array.isArray((att as { blocks?: unknown }).blocks)) {
+          collected.push(...(att as { blocks: unknown[] }).blocks);
+        }
+      }
+    }
+    if (collected.length === 0 && inner.interactive && Array.isArray(inner.interactive.blocks)) {
+      collected.push(...inner.interactive.blocks);
+    }
+    if (collected.length > 0) return collected;
+  }
+  const root = body as { blocks?: unknown; attachments?: unknown };
+  const collected: unknown[] = [];
+  if (Array.isArray(root.blocks)) {
+    collected.push(...root.blocks);
+  }
+  if (Array.isArray(root.attachments)) {
+    for (const att of root.attachments) {
+      if (att && typeof att === "object" && Array.isArray((att as { blocks?: unknown }).blocks)) {
+        collected.push(...(att as { blocks: unknown[] }).blocks);
+      }
+    }
+  }
+  return collected;
+}
+
+function classifyFenceBlocks(blocks: unknown[]): "abstract" | "raw" | "empty" {
+  let abstractCount = 0;
+  let rawCount = 0;
+  for (const b of blocks) {
+    if (b && typeof b === "object") {
+      const type = (b as { type?: unknown }).type;
+      if (typeof type === "string") {
+        if (ABSTRACT_BLOCK_TYPES.has(type)) abstractCount += 1;
+        else rawCount += 1;
+      }
+    }
+  }
+  if (abstractCount === 0 && rawCount === 0) return "empty";
+  // mixed → treat as raw (Slack Block Kit native is more expressive). Abstract types
+  // are subset of valid Slack types in practice anyway.
+  return rawCount > 0 ? "raw" : "abstract";
+}
+
+function extractClawInteractive(text: string): {
+  text: string;
+  interactive?: ClawInteractive;
+  rawSlackBlocks?: unknown[];
+} {
+  if (!text) {
+    return { text };
+  }
+  const hasOpenclawFence = text.includes("```openclaw-");
+  // CLAW-FORK fallback: also rescue ```json fences that contain the dispatch
+  // output schema (`"type":"openclaw-interactive"`).
+  const hasJsonFallback = /"type"\s*:\s*"openclaw-interactive"/i.test(text);
+  if (!hasOpenclawFence && !hasJsonFallback) {
+    return { text };
+  }
+  let stripped = text;
+  let abstractBlocks: ClawInteractiveBlock[] = [];
+  let rawBlocks: unknown[] = [];
+  const handleBody = (body: string): void => {
+    try {
+      const parsed = JSON.parse(body) as unknown;
+      const blocks = extractFenceBlocksFromBody(parsed);
+      if (blocks.length === 0) return;
+      const klass = classifyFenceBlocks(blocks);
+      if (klass === "abstract") {
+        const validated = blocks.filter(isClawInteractiveBlock);
+        abstractBlocks = abstractBlocks.concat(validated);
+        logVerbose(
+          `[claw-debug] fence: abstract blocks=${validated.length} types=${validated.map((b) => b.type).join(",")}`,
+        );
+      } else if (klass === "raw") {
+        rawBlocks = rawBlocks.concat(blocks);
+        const types = blocks
+          .map((b) =>
+            b && typeof b === "object" ? String((b as { type?: unknown }).type ?? "?") : "?",
+          )
+          .join(",");
+        logVerbose(`[claw-debug] fence: raw Slack blocks=${blocks.length} types=${types}`);
+      }
+    } catch (err) {
+      logVerbose(`[claw-debug] fence: invalid JSON (${(err as Error).message})`);
+    }
+  };
+  stripped = stripped.replace(INTERACTIVE_FENCE_RE, (_match, body: string) => {
+    handleBody(body);
+    return "";
+  });
+  if (hasJsonFallback) {
+    stripped = stripped.replace(JSON_INTERACTIVE_FENCE_RE, (_match, body: string) => {
+      handleBody(body);
+      logVerbose(`[claw-debug] fence: rescued json-fenced openclaw-interactive payload`);
+      return "";
+    });
+  }
+  stripped = stripped.replace(/\n{3,}/g, "\n\n").trim();
+  return {
+    text: stripped,
+    ...(abstractBlocks.length > 0 ? { interactive: { blocks: abstractBlocks } } : {}),
+    ...(rawBlocks.length > 0 ? { rawSlackBlocks: rawBlocks } : {}),
+  };
+}
+
 /** Parses inline reply directives into payload fields and silent-reply state. */
 export function normalizeReplyPayloadDirectives(params: {
   payload: ReplyPayload;
@@ -48,8 +267,51 @@ export function normalizeReplyPayloadDirectives(params: {
     text = text.trimStart() || undefined;
   }
 
+  // CLAW-FORK: pull out interactive fence after directive parsing.
+  let interactive = params.payload.interactive;
+  let injectedRawSlackBlocks: unknown[] | undefined;
+  if (text) {
+    const extracted = extractClawInteractive(text);
+    text = extracted.text || undefined;
+    if (!interactive && extracted.interactive) {
+      // ClawInteractive button.style is `string` (loose); InteractiveReply expects
+      // the strict InteractiveButtonStyle enum. Runtime validators downstream
+      // already coerce/validate, so the cast here is safe.
+      interactive = extracted.interactive as unknown as typeof interactive;
+    }
+    if (extracted.rawSlackBlocks && extracted.rawSlackBlocks.length > 0) {
+      injectedRawSlackBlocks = extracted.rawSlackBlocks;
+    }
+  }
+
   const mediaUrls = params.payload.mediaUrls ?? parsed?.mediaUrls;
   const mediaUrl = params.payload.mediaUrl ?? parsed?.mediaUrl ?? mediaUrls?.[0];
+
+  // CLAW-FORK: merge raw Slack blocks into channelData.slack.blocks if any.
+  let mergedChannelData = params.payload.channelData;
+  if (injectedRawSlackBlocks && injectedRawSlackBlocks.length > 0) {
+    const baseChannelData =
+      params.payload.channelData && typeof params.payload.channelData === "object"
+        ? (params.payload.channelData as Record<string, unknown>)
+        : {};
+    const baseSlack =
+      baseChannelData.slack &&
+      typeof baseChannelData.slack === "object" &&
+      !Array.isArray(baseChannelData.slack)
+        ? (baseChannelData.slack as Record<string, unknown>)
+        : {};
+    const existingBlocks = Array.isArray(baseSlack.blocks) ? (baseSlack.blocks as unknown[]) : [];
+    mergedChannelData = {
+      ...baseChannelData,
+      slack: {
+        ...baseSlack,
+        blocks: [...existingBlocks, ...injectedRawSlackBlocks],
+      },
+    };
+    logVerbose(
+      `[claw-debug] channelData.slack.blocks injected: existing=${existingBlocks.length} added=${injectedRawSlackBlocks.length}`,
+    );
+  }
 
   return {
     payload: copyReplyPayloadMetadata(params.payload, {
@@ -57,6 +319,8 @@ export function normalizeReplyPayloadDirectives(params: {
       text,
       mediaUrls,
       mediaUrl,
+      ...(interactive ? { interactive } : {}),
+      ...(mergedChannelData ? { channelData: mergedChannelData } : {}),
       replyToId: params.payload.replyToId ?? parsed?.replyToId,
       replyToTag: params.payload.replyToTag || parsed?.replyToTag,
       replyToCurrent: params.payload.replyToCurrent || parsed?.replyToCurrent,

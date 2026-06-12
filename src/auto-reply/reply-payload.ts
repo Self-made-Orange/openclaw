@@ -157,6 +157,14 @@ export function buildTtsSupplementMediaPayload(payload: ReplyPayload): ReplyPayl
 export type ReplyPayloadMetadata = {
   assistantMessageIndex?: number;
   /**
+   * CLAW-FORK: names of tools the agent invoked during the turn that produced
+   * this reply payload (deduped, preserves first-seen order). Populated by the
+   * dispatch pipeline so reviewer/audit hooks can see what work the agent did
+   * before deciding whether the reply is well-formed (e.g. a `MEDIA: <file>`
+   * directive with no `Write`/`Bash` tool call is suspicious).
+   */
+  toolCallNames?: string[];
+  /**
    * Internal OpenClaw notices generated after a runtime/provider failure are
    * not assistant source replies. Dispatch may deliver them even when normal
    * assistant source replies are message-tool-only; sendPolicy deny still wins.

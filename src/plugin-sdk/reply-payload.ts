@@ -11,10 +11,15 @@ export type { MediaPayload, MediaPayloadInput } from "../channels/plugins/media-
 export { buildMediaPayload } from "../channels/plugins/media-payload.js";
 /** Plugin-facing reply payload without core-only trusted local media internals. */
 export type ReplyPayload = Omit<InternalReplyPayload, "trustedLocalMedia">;
-export type { ReplyPayloadTtsSupplement } from "../auto-reply/reply-payload.js";
+export type {
+  ReplyPayloadMetadata,
+  ReplyPayloadTtsSupplement,
+} from "../auto-reply/reply-payload.js";
 export {
   buildTtsSupplementMediaPayload,
+  getReplyPayloadMetadata,
   getReplyPayloadTtsSupplement,
+  setReplyPayloadMetadata,
   isReplyPayloadNonTerminalToolErrorWarning,
   isReplyPayloadTtsSupplement,
   markReplyPayloadAsTtsSupplement,
