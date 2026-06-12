@@ -1092,6 +1092,9 @@ export const AgentEntrySchema = z
     params: z.record(z.string(), z.unknown()).optional(),
     tools: AgentToolsSchema,
     runtime: AgentRuntimeSchema,
+    // CLAW-FORK: per-agent outbound-response reviewer policy ("on" default).
+    // Distinct from the upstream exec-approval reviewer (tools.exec.reviewer).
+    responseReviewer: z.enum(["on", "off"]).optional(),
   })
   .strict();
 

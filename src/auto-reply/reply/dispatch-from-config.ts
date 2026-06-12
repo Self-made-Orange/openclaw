@@ -113,6 +113,7 @@ import {
   getReplyPayloadMetadata,
   isReplyPayloadStatusNotice,
   markReplyPayloadAsTtsSupplement,
+  setReplyPayloadMetadata,
   type ReplyPayload,
 } from "../reply-payload.js";
 import type { FinalizedMsgContext } from "../templating.js";
@@ -2654,6 +2655,20 @@ export async function dispatchReplyFromConfig(
       };
     };
 
+    // CLAW-FORK 2026-05-06 (ported to v2026.6.6 base): accumulate tool call
+    // names this turn so the final reply payload metadata can carry them —
+    // reviewer/audit hooks need to know what tools ran when judging draft
+    // replies (e.g. MEDIA directive present but no Write/Bash call = suspicious).
+    const turnToolCallNames: string[] = [];
+    const turnToolCallNamesSeen = new Set<string>();
+    const recordTurnToolCall = (name: string | undefined): void => {
+      if (!name) return;
+      const trimmed = name.trim();
+      if (!trimmed || turnToolCallNamesSeen.has(trimmed)) return;
+      turnToolCallNamesSeen.add(trimmed);
+      turnToolCallNames.push(trimmed);
+    };
+
     // Snapshot verbose progress visibility for this run: commentary
     // classification in the CLI runners is wired once at run start, so a
     // mid-run verbose toggle cannot move inter-tool commentary between lanes.
@@ -2725,15 +2740,25 @@ export async function dispatchReplyFromConfig(
               params.replyOptions?.onAssistantMessageStart,
             ),
             onBlockReplyQueued: wrapProgressCallback(params.replyOptions?.onBlockReplyQueued),
-            onToolStart: wrapProgressCallback(params.replyOptions?.onToolStart, {
-              forwardWhenSourceDeliverySuppressed: true,
-              requiresToolSummaryVisibility: true,
-              waitForDirectBlockReplyDelivery: true,
-              onForward: async () => {
-                // Commentary precedes the tool that follows it.
-                await flushPendingCommentaryProgress();
-              },
-            }),
+            onToolStart: (() => {
+              const forwardToolStart = wrapProgressCallback(params.replyOptions?.onToolStart, {
+                forwardWhenSourceDeliverySuppressed: true,
+                requiresToolSummaryVisibility: true,
+                waitForDirectBlockReplyDelivery: true,
+                onForward: async () => {
+                  // Commentary precedes the tool that follows it.
+                  await flushPendingCommentaryProgress();
+                },
+              });
+              // CLAW-FORK 2026-05-06: record tool-call provenance for the
+              // reviewer hook regardless of progress-forwarding gates.
+              return async (
+                payload: Parameters<NonNullable<GetReplyOptions["onToolStart"]>>[0],
+              ) => {
+                recordTurnToolCall(payload.name);
+                await forwardToolStart?.(payload);
+              };
+            })(),
             onItemEvent,
             commentaryProgressEnabled:
               deliverStandaloneCommentaryProgress || params.replyOptions?.commentaryProgressEnabled,
@@ -3080,6 +3105,18 @@ export async function dispatchReplyFromConfig(
     }
 
     const replies = replyResult ? (Array.isArray(replyResult) ? replyResult : [replyResult]) : [];
+    // CLAW-FORK 2026-05-06: stamp tool-call provenance onto final reply payloads
+    // so the slack reviewer hook (and any future audit consumer) can see what
+    // tools the agent actually used when judging the draft. Without this, the
+    // reviewer always saw "(none)" and falsely rejected MEDIA replies whose
+    // file was, in fact, just written by Bash/Write.
+    if (turnToolCallNames.length > 0) {
+      for (const reply of replies) {
+        const existing = getReplyPayloadMetadata(reply)?.toolCallNames ?? [];
+        if (existing.length > 0) continue;
+        setReplyPayloadMetadata(reply, { toolCallNames: turnToolCallNames });
+      }
+    }
     // Backstop: silent/streaming-delivered turns end without a visible final
     // reply; trailing commentary must still land.
     await flushPendingCommentaryProgress();
