@@ -230,12 +230,9 @@ const SYSTEM_PROMPT_OVERRIDE_LEGACY_RULES: LegacyConfigRule[] = [
     message:
       'agents.defaults.systemPromptOverride was removed; OpenClaw owns the generated system prompt. Run "openclaw doctor --fix" to remove it.',
   },
-  {
-    path: ["agents", "list"],
-    message:
-      'agents.list[].systemPromptOverride was removed; OpenClaw owns the generated system prompt. Run "openclaw doctor --fix" to remove it.',
-    match: (value) => hasAgentListSystemPromptOverride(value),
-  },
+  // CLAW-FORK: agents.list[].systemPromptOverride is supported again
+  // (per-agent override wired through materializeSystemPromptValue), so the
+  // per-agent removal rule from upstream v2026.6.6 is intentionally dropped.
 ];
 
 function sandboxScopeFromPerSession(perSession: boolean): "session" | "shared" {
@@ -327,13 +324,6 @@ function hasAgentListRuntimePolicy(value: unknown): boolean {
     return false;
   }
   return value.some((agent) => getRecord(getRecord(agent)?.agentRuntime) !== null);
-}
-
-function hasAgentListSystemPromptOverride(value: unknown): boolean {
-  if (!Array.isArray(value)) {
-    return false;
-  }
-  return value.some((agent) => Object.hasOwn(getRecord(agent) ?? {}, "systemPromptOverride"));
 }
 
 function hasOwnTimeoutMs(value: unknown): boolean {
@@ -628,18 +618,8 @@ function removeLegacySystemPromptOverride(raw: Record<string, unknown>, changes:
     delete defaults.systemPromptOverride;
     changes.push("Removed agents.defaults.systemPromptOverride.");
   }
-
-  if (!Array.isArray(agents?.list)) {
-    return;
-  }
-  for (const [index, agent] of agents.list.entries()) {
-    const agentRecord = getRecord(agent);
-    if (!agentRecord || !Object.hasOwn(agentRecord, "systemPromptOverride")) {
-      continue;
-    }
-    delete agentRecord.systemPromptOverride;
-    changes.push(`Removed agents.list.${index}.systemPromptOverride.`);
-  }
+  // CLAW-FORK: agents.list[].systemPromptOverride is a supported key again;
+  // do not strip it from agent entries.
 }
 
 const CONFIGURED_TOOL_SECTION_GRANTS = [

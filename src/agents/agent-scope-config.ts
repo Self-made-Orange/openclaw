@@ -34,6 +34,8 @@ export type ResolvedAgentConfig = {
   tts?: AgentEntry["tts"];
   contextLimits?: AgentContextLimitsConfig;
   heartbeat?: AgentEntry["heartbeat"];
+  // CLAW-FORK: per-agent system prompt override (replaces generated prompt).
+  systemPromptOverride?: AgentEntry["systemPromptOverride"];
   identity?: AgentEntry["identity"];
   groupChat?: AgentEntry["groupChat"];
   subagents?: AgentEntry["subagents"];
@@ -147,6 +149,8 @@ export function resolveAgentConfig(
         ? { ...agentDefaults?.contextLimits, ...entry.contextLimits }
         : agentDefaults?.contextLimits,
     heartbeat: entry.heartbeat,
+    // CLAW-FORK: per-agent system prompt override.
+    systemPromptOverride: readStringValue(entry.systemPromptOverride),
     identity: entry.identity,
     groupChat: entry.groupChat,
     subagents: typeof entry.subagents === "object" && entry.subagents ? entry.subagents : undefined,

@@ -1095,6 +1095,10 @@ export const AgentEntrySchema = z
     // CLAW-FORK: per-agent outbound-response reviewer policy ("on" default).
     // Distinct from the upstream exec-approval reviewer (tools.exec.reviewer).
     responseReviewer: z.enum(["on", "off"]).optional(),
+    // CLAW-FORK: per-agent system prompt override. Replaces the generated
+    // system prompt. Supports `<file:...>` directives (tilde-expanded,
+    // mtime-cached) via materializeSystemPromptValue.
+    systemPromptOverride: z.string().optional(),
   })
   .strict();
 

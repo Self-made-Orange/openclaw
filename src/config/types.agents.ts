@@ -163,6 +163,11 @@ export type AgentConfig = {
   contextTokens?: number;
   /** Optional per-agent heartbeat overrides. */
   heartbeat?: AgentDefaultsConfig["heartbeat"];
+  /**
+   * CLAW-FORK: replaces the generated system prompt for this agent.
+   * Supports `<file:...>` directives (tilde-expanded, mtime-cached).
+   */
+  systemPromptOverride?: string;
   identity?: IdentityConfig;
   groupChat?: GroupChatConfig;
   subagents?: {
