@@ -271,9 +271,13 @@ export function matchesCliBackendReply(text: string, expected: string): boolean 
   );
 }
 
-export function withClaudeMcpConfigOverrides(args: string[], mcpConfigPath: string): string[] {
+export function withClaudeMcpConfigOverrides(
+  args: string[],
+  mcpConfigPath: string,
+  strict = true,
+): string[] {
   const next = [...args];
-  if (!next.includes("--strict-mcp-config")) {
+  if (strict && !next.includes("--strict-mcp-config")) {
     next.push("--strict-mcp-config");
   }
   if (!next.includes("--mcp-config")) {

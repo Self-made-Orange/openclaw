@@ -130,6 +130,12 @@ export type CliBackendConfig = {
   command: string;
   /** Base args applied to every invocation. */
   args?: string[];
+  /**
+   * Whether OpenClaw passes `--strict-mcp-config` alongside its bundle MCP
+   * config (Claude CLI only). Default true. Set false to let user-scope MCP
+   * servers (e.g. claude.ai connectors) load in addition to the bundle.
+   */
+  bundleMcpStrict?: boolean;
   /** Output parsing mode (default: json). */
   output?: "json" | "text" | "jsonl";
   /** Output parsing mode when resuming a CLI session. */

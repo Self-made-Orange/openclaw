@@ -41,6 +41,32 @@ describe("prepareCliBundleMcpConfig", () => {
     await prepared.cleanup?.();
   });
 
+  it("omits --strict-mcp-config when bundleMcpStrict is false", async () => {
+    const workspaceDir = await cliBundleMcpHarness.tempHarness.createTempDir(
+      "openclaw-cli-bundle-mcp-nonstrict-",
+    );
+
+    const prepared = await prepareCliBundleMcpConfig({
+      enabled: true,
+      mode: "claude-config-file",
+      backend: {
+        command: "node",
+        args: ["./fake-claude.mjs", "--strict-mcp-config"],
+        bundleMcpStrict: false,
+      },
+      workspaceDir,
+      config: { plugins: { enabled: false } },
+    });
+
+    // Non-strict mode keeps user-scope MCP servers loadable while still
+    // injecting the bundle overlay.
+    expect(prepared.backend.args).not.toContain("--strict-mcp-config");
+    expect(prepared.backend.resumeArgs).not.toContain("--strict-mcp-config");
+    expect(requireMcpConfigPath(prepared.backend.args)).toBeTruthy();
+
+    await prepared.cleanup?.();
+  });
+
   it("injects a merged --mcp-config overlay for bundle-MCP-enabled backends", async () => {
     const prepared = await prepareBundleProbeCliConfig();
 

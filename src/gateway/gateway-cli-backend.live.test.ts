@@ -381,7 +381,11 @@ describeLive("gateway live (cli backend)", () => {
       ) {
         const mcpConfigPath = path.join(tempDir, "claude-mcp.json");
         await fs.writeFile(mcpConfigPath, `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`);
-        cliArgs = withClaudeMcpConfigOverrides(baseCliArgs, mcpConfigPath);
+        cliArgs = withClaudeMcpConfigOverrides(
+          baseCliArgs,
+          mcpConfigPath,
+          backendResolved?.config.bundleMcpStrict !== false,
+        );
       }
 
       const cfg: OpenClawConfig = {};

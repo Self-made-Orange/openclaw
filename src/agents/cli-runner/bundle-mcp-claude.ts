@@ -24,6 +24,7 @@ export function findClaudeMcpConfigPath(args?: string[]): string | undefined {
 export function injectClaudeMcpConfigArgs(
   args: string[] | undefined,
   mcpConfigPath: string,
+  strict = true,
 ): string[] {
   const next: string[] = [];
   for (let i = 0; i < (args?.length ?? 0); i += 1) {
@@ -40,6 +41,9 @@ export function injectClaudeMcpConfigArgs(
     }
     next.push(arg);
   }
-  next.push("--strict-mcp-config", "--mcp-config", mcpConfigPath);
+  if (strict) {
+    next.push("--strict-mcp-config");
+  }
+  next.push("--mcp-config", mcpConfigPath);
   return next;
 }
