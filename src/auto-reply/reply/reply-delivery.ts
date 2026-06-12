@@ -1,4 +1,5 @@
 /** Normalizes reply directives and delivers block replies through streaming or direct paths. */
+import path from "node:path";
 import { hasOutboundReplyContent } from "openclaw/plugin-sdk/reply-payload";
 import { logVerbose } from "../../globals.js";
 import { copyReplyPayloadMetadata, isReplyPayloadStatusNotice } from "../reply-payload.js";
@@ -6,6 +7,12 @@ import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { BlockReplyContext, ReplyPayload, ReplyThreadingPolicy } from "../types.js";
 import type { BlockReplyPipeline } from "./block-reply-pipeline.js";
 import { createBlockReplyContentKey } from "./block-reply-pipeline.js";
+import {
+  applyMediaFormatGuard,
+  detectHallucinatedFiles,
+  mergeSlackBlocksIntoChannelData,
+  readSlackBlocksFromChannelData,
+} from "./delivery-guards.js";
 import { parseReplyDirectives } from "./reply-directives.js";
 import { applyReplyTagsToPayload, isRenderablePayload } from "./reply-payloads.js";
 import type { TypingSignaler } from "./typing-mode.js";
@@ -48,8 +55,50 @@ export function normalizeReplyPayloadDirectives(params: {
     text = text.trimStart() || undefined;
   }
 
-  const mediaUrls = params.payload.mediaUrls ?? parsed?.mediaUrls;
+  let mediaUrls = params.payload.mediaUrls ?? parsed?.mediaUrls;
+
+  // CLAW-FORK: detect output/<file>.<ext> mentions in body or blocks. If the
+  // file actually exists, auto-attach (rescues compliance lapses where Kimi
+  // forgot the MEDIA directive). If missing, log a warning so we can spot
+  // hallucinations in the gateway log. See delivery-guards.ts for details.
+  const detection = detectHallucinatedFiles({
+    text,
+    blocks: readSlackBlocksFromChannelData(params.payload.channelData),
+    existingMediaUrls: mediaUrls,
+  });
+  if (detection.autoAttach.length > 0) {
+    mediaUrls = [...(mediaUrls ?? []), ...detection.autoAttach];
+    logVerbose(
+      `[claw-debug] hallucination-guard auto-attached files: ${detection.autoAttach
+        .map((p) => path.basename(p))
+        .join(", ")}`,
+    );
+  }
+  if (detection.missing.length > 0) {
+    logVerbose(
+      `[claw-debug] hallucination-guard missing files (path mentioned but not on disk): ${detection.missing.join(
+        ", ",
+      )}`,
+    );
+  }
+
   const mediaUrl = params.payload.mediaUrl ?? parsed?.mediaUrl ?? mediaUrls?.[0];
+
+  // CLAW-FORK 2026-05-03: format-guard — rewrite banned abstract shorthand
+  // (interactive without raw blocks) to a 3-block RAW Block Kit card when a
+  // media attachment is present. See delivery-guards.ts for full rationale.
+  let interactive = params.payload.interactive;
+  let channelData = params.payload.channelData;
+  const formatGuard = applyMediaFormatGuard({ interactive, text, mediaUrl, mediaUrls });
+  if (formatGuard) {
+    channelData = mergeSlackBlocksIntoChannelData(channelData, formatGuard.rewrittenBlocks);
+    // Drop the abstract interactive so we don't double-render with the RAW
+    // blocks injected into channelData.slack.blocks.
+    interactive = undefined;
+    logVerbose(
+      `[claw-debug] format-guard: rewrote abstract shorthand to RAW Block Kit (file=${formatGuard.fileBaseRaw}, summary=${formatGuard.summary.slice(0, 60).replace(/\n/g, " ")}…)`,
+    );
+  }
 
   return {
     payload: copyReplyPayloadMetadata(params.payload, {
@@ -57,6 +106,8 @@ export function normalizeReplyPayloadDirectives(params: {
       text,
       mediaUrls,
       mediaUrl,
+      interactive,
+      ...(channelData ? { channelData } : {}),
       replyToId: params.payload.replyToId ?? parsed?.replyToId,
       replyToTag: params.payload.replyToTag || parsed?.replyToTag,
       replyToCurrent: params.payload.replyToCurrent || parsed?.replyToCurrent,
