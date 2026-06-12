@@ -186,14 +186,6 @@ export type ReplyPayloadMetadata = {
   beforeAgentRunBlocked?: boolean;
   /** Warning synthesized from an observed tool error after the run produced assistant output. */
   nonTerminalToolErrorWarning?: boolean;
-  /**
-   * Names of tools the agent invoked during the turn that produced this reply
-   * payload (deduped, preserves first-seen order). Populated by the dispatch
-   * pipeline so reviewer/audit hooks can see what work the agent did before
-   * deciding whether the reply is well-formed (e.g. a `MEDIA: <file>` directive
-   * with no `Write`/`Bash` tool call is suspicious).
-   */
-  toolCallNames?: string[];
 };
 
 const replyPayloadMetadata = new WeakMap<object, ReplyPayloadMetadata>();
