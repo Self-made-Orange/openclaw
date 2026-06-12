@@ -126,6 +126,11 @@ function compileConfiguredBindingRegistry(params: {
   const rulesByChannel = new Map<ConfiguredBindingChannel, CompiledConfiguredBinding[]>();
 
   for (const binding of listConfiguredBindings(params.cfg)) {
+    // CLAW-FORK (multi-agent): intent bindings are handled by the
+    // intent-router tier in resolve-route.ts, not compiled as channel rules.
+    if (binding.type === "intent") {
+      continue;
+    }
     const bindingConversationId = resolveBindingConversationId(binding);
     if (!bindingConversationId) {
       continue;

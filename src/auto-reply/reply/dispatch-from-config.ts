@@ -45,6 +45,7 @@ import { applyMergePatch } from "../../config/merge-patch.js";
 import { resolveGroupSessionKey } from "../../config/sessions/group.js";
 import { appendAssistantMessageToSessionTranscript } from "../../config/sessions/transcript.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
+import { INTENT_PENDING_AGENT_ID } from "../../config/types.agents.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { fireAndForgetHook } from "../../hooks/fire-and-forget.js";
@@ -61,6 +62,8 @@ import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline
 import { formatErrorMessage } from "../../infra/errors.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import { isAbortError } from "../../infra/unhandled-rejections.js";
+// CLAW-FORK (multi-agent): per-agent metrics jsonl.
+import { recordAgentMetrics } from "../../logging/agent-metrics.js";
 import type { StuckSessionRecoveryOutcome } from "../../logging/diagnostic-session-recovery.js";
 import {
   logMessageDispatchCompleted,
@@ -85,7 +88,16 @@ import {
 } from "../../plugins/conversation-binding.js";
 import { getGlobalHookRunner, getGlobalPluginRegistry } from "../../plugins/hook-runner-global.js";
 import type { PluginHookReplyDispatchEvent } from "../../plugins/hook-types.js";
-import { isAcpSessionKey } from "../../routing/session-key.js";
+// CLAW-FORK (multi-agent): intent-router sentinel resolution + log enrichment.
+import {
+  checkStickyThreadAgent,
+  extractThreadKeyFromSessionKey,
+  findIntentBinding,
+  resolveIntentAgent,
+  setStickyThreadAgent,
+  type IntentRouterDecision,
+} from "../../routing/intent-router.js";
+import { isAcpSessionKey, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { resolveSilentReplyPolicyFromPolicies } from "../../shared/silent-reply-policy.js";
@@ -1047,6 +1059,96 @@ export async function dispatchReplyFromConfig(
   const channel = normalizeLowercaseStringOrEmpty(ctx.Surface ?? ctx.Provider ?? "unknown");
   const chatId = ctx.To ?? ctx.From;
   const messageId = ctx.MessageSid ?? ctx.MessageSidFirst ?? ctx.MessageSidLast;
+  // CLAW-FORK (multi-agent): ctx.SessionKey may carry the synthetic
+  // INTENT_PENDING_AGENT_ID sentinel emitted by `resolveAgentRoute`'s
+  // `binding.intent` tier. Detect it BEFORE any session-store / hook / log
+  // work so downstream sees the real agentId. The intent classifier resolves
+  // the real agent, then we rebuild the sessionKey by swapping the sentinel
+  // agentId for the resolved one and mutate ctx.SessionKey in place.
+  // Routing provenance for the diagnostic log + metrics below — only
+  // populated on the intent-router path.
+  let routeMatchedBy: string | undefined;
+  let routeIntentReason: string | undefined;
+  if (ctx.SessionKey && ctx.SessionKey.includes(`agent:${INTENT_PENDING_AGENT_ID}:`)) {
+    const pendingSessionKey = ctx.SessionKey;
+    const accountId = typeof ctx.AccountId === "string" ? ctx.AccountId : undefined;
+    // ctx.From/ctx.To don't reliably hold the channel/peer id for inbound
+    // channel messages — the peer id is most reliably embedded in the
+    // sessionKey itself (e.g.
+    // `agent:__intent_pending__:slack:channel:c0atzba2ekx[:thread:...]`).
+    // Parse it out so findIntentBinding receives the same id that
+    // resolveAgentRoute saw when it emitted the sentinel.
+    const sessionPeerMatch = pendingSessionKey.match(/:slack:(?:channel|direct|group|dm):([^:]+)/i);
+    const sessionPeerId = sessionPeerMatch ? sessionPeerMatch[1] : undefined;
+    const peerId = sessionPeerId ?? (typeof ctx.From === "string" ? ctx.From : undefined);
+    const binding = findIntentBinding({ cfg, channel, accountId, peerId });
+    if (binding) {
+      const messageText =
+        (typeof ctx.BodyForCommands === "string" && ctx.BodyForCommands) ||
+        (typeof ctx.RawBody === "string" && ctx.RawBody) ||
+        (typeof ctx.Body === "string" && ctx.Body) ||
+        "";
+      // Resolve agent in priority order:
+      // 1. thread-sticky — same thread already resolved an agent earlier
+      // 2. keyword classifier — fresh dispatches; pins the thread afterwards
+      // NOTE: sticky is in-process memory — evaporates on gateway restart.
+      // (The fork's parent-message thread-inherit tier was dropped in this
+      // port — upstream's binding.peer.parent tier + thread session keys +
+      // the sticky pin below cover it.)
+      const threadKey = extractThreadKeyFromSessionKey(pendingSessionKey);
+      const stickyDecision: IntentRouterDecision | undefined = threadKey
+        ? checkStickyThreadAgent(threadKey)
+        : undefined;
+      let decision: IntentRouterDecision;
+      let routeMatchedBySuffix = "";
+      if (stickyDecision) {
+        decision = stickyDecision;
+        routeMatchedBySuffix = ".thread-sticky";
+      } else {
+        decision = await resolveIntentAgent({
+          cfg,
+          binding,
+          channel,
+          accountId,
+          peerId,
+          text: messageText,
+        });
+        // Pin the resolved agent to this thread so follow-up messages in the
+        // same thread route consistently without re-classifying.
+        if (threadKey) {
+          setStickyThreadAgent(
+            threadKey,
+            decision.agentId,
+            binding.router.fallbackAgentId ?? "main",
+          );
+        }
+      }
+      const resolvedKey = pendingSessionKey.replace(
+        `agent:${INTENT_PENDING_AGENT_ID}:`,
+        `agent:${decision.agentId}:`,
+      );
+      logVerbose(
+        `[intent-router] ${INTENT_PENDING_AGENT_ID} → ${decision.agentId} (reason="${decision.reason}", cached=${decision.cached}, fellBack=${decision.fellBack})`,
+      );
+      // Mutate ctx so all downstream readers see the resolved sessionKey.
+      ctx.SessionKey = resolvedKey;
+      routeMatchedBy = `binding.intent${routeMatchedBySuffix}`;
+      routeIntentReason = `${decision.reason}${decision.cached ? " (cached)" : ""}${decision.fellBack ? " (fellBack)" : ""}`;
+    } else {
+      // Safety net: if findIntentBinding can't match here (binding lookup
+      // mismatch / timing race / etc), do NOT let the sentinel propagate to
+      // the agent runner — it would create a ghost
+      // `agents/__intent_pending__/sessions/...` namespace. Rewrite the
+      // sentinel to "main" and proceed safely.
+      const safeKey = pendingSessionKey.replace(`agent:${INTENT_PENDING_AGENT_ID}:`, "agent:main:");
+      logVerbose(
+        `[intent-router] sentinel sessionKey but no matching intent binding (channel=${channel}); falling back to main`,
+      );
+      ctx.SessionKey = safeKey;
+      routeMatchedBy = "binding.intent.unresolved";
+      routeIntentReason = "no-matching-intent-binding (fallback main)";
+    }
+  }
   const sessionKey =
     normalizeOptionalString(ctx.SessionKey) ?? normalizeOptionalString(ctx.CommandTargetSessionKey);
   const startTime = diagnosticsEnabled ? Date.now() : 0;
@@ -1110,7 +1212,33 @@ export async function dispatchReplyFromConfig(
         reason: opts?.reason,
       });
     }
-    messageLifecycle.markProcessed(outcome, opts);
+    // CLAW-FORK (multi-agent): lazy-resolve agentId from sessionKey at log
+    // time so intent-router routing decisions surface in diagnostics.
+    const agentId = sessionKey ? resolveAgentIdFromSessionKey(sessionKey) : undefined;
+    messageLifecycle.markProcessed(outcome, {
+      ...opts,
+      agentId,
+      matchedBy: routeMatchedBy,
+      reason: opts?.reason ?? (routeIntentReason ? `intent:${routeIntentReason}` : undefined),
+    });
+    // CLAW-FORK (multi-agent): mirror to JSONL for offline analysis
+    // (per-agent counts, p50/p95 latency, intent-reason distribution).
+    // Best-effort, never throws.
+    if (diagnosticsEnabled) {
+      recordAgentMetrics({
+        ts: new Date().toISOString(),
+        agentId,
+        matchedBy: routeMatchedBy,
+        intentReason: routeIntentReason,
+        channel,
+        chatId: chatId == null ? undefined : String(chatId),
+        messageId: messageId == null ? undefined : String(messageId),
+        outcome,
+        durationMs: Date.now() - startTime,
+        reason: opts?.reason,
+        error: opts?.error,
+      });
+    }
   };
 
   const recordAgentDispatchStarted = () => {

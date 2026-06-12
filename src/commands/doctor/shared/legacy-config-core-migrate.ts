@@ -26,7 +26,8 @@ function pruneBindingsForMissingAgents(cfg: OpenClawConfig, changes: string[]): 
 
   const agentIds = new Set(validAgents.map((agent) => normalizeAgentId(agent.id)));
   const nextBindings = bindings.filter((binding) => {
-    const agentId = binding && typeof binding === "object" ? binding.agentId : undefined;
+    const agentId =
+      binding && typeof binding === "object" && "agentId" in binding ? binding.agentId : undefined;
     return typeof agentId !== "string" || agentIds.has(normalizeAgentId(agentId));
   });
   const removed = bindings.length - nextBindings.length;

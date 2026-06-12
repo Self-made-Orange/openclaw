@@ -12,6 +12,9 @@ type MessageLifecycleProcessedOptions = MessageLifecycleRef & {
   durationMs?: number;
   reason?: string;
   error?: string;
+  // CLAW-FORK (multi-agent): routing provenance forwarded to logMessageProcessed.
+  agentId?: string;
+  matchedBy?: string;
 };
 
 export function createDiagnosticMessageLifecycle(
@@ -85,6 +88,8 @@ export function createDiagnosticMessageLifecycle(
         messageId: params.messageId,
         sessionId: ref.sessionId,
         sessionKey: ref.sessionKey,
+        agentId: options?.agentId,
+        matchedBy: options?.matchedBy,
         durationMs: options?.durationMs ?? Date.now() - startedAtMs,
         outcome,
         reason: options?.reason,

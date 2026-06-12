@@ -2,9 +2,17 @@
 import type { AgentAcpBinding, AgentBinding, AgentRouteBinding } from "./types.agents.js";
 import type { OpenClawConfig } from "./types.openclaw.js";
 
-function normalizeBindingType(binding: AgentBinding): "route" | "acp" {
+function normalizeBindingType(binding: AgentBinding): "route" | "acp" | "intent" {
   // Missing `type` is the legacy/default route binding shape.
-  return binding.type === "acp" ? "acp" : "route";
+  if (binding.type === "acp") {
+    return "acp";
+  }
+  // CLAW-FORK (multi-agent): intent bindings are handled by the intent-router
+  // tier in resolve-route.ts, never as channel route bindings.
+  if (binding.type === "intent") {
+    return "intent";
+  }
+  return "route";
 }
 
 /** Narrows a configured binding to the channel route form. */

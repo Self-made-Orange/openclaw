@@ -5,7 +5,7 @@
  */
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { LegacyConfigRule } from "../../config/legacy.shared.js";
-import type { AgentBinding } from "../../config/types.agents.js";
+import type { AgentBinding, AgentIntentBinding } from "../../config/types.agents.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { GroupToolPolicyConfig } from "../../config/types.tools.js";
 import type { ChannelApprovalNativeRuntimeAdapter } from "../../infra/approval-handler-runtime-types.js";
@@ -46,7 +46,8 @@ import type {
 } from "./types.core.js";
 export type { ChannelPairingAdapter } from "./pairing.types.js";
 
-type ConfiguredBindingRule = AgentBinding;
+// CLAW-FORK (multi-agent): intent bindings never reach channel providers.
+type ConfiguredBindingRule = Exclude<AgentBinding, AgentIntentBinding>;
 export type { ChannelApprovalKind } from "../../infra/approval-types.js";
 
 export type ChannelActionAvailabilityState =
