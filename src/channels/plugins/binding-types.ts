@@ -3,7 +3,7 @@
  *
  * Defines normalized conversation facts, binding records, and stateful target descriptors.
  */
-import type { AgentBinding } from "../../config/types.js";
+import type { AgentBinding, AgentIntentBinding } from "../../config/types.js";
 import type {
   ConversationRef,
   SessionBindingRecord,
@@ -28,7 +28,9 @@ export type ConfiguredBindingChannel = ChannelId;
 /**
  * Raw binding config entry from OpenClaw config.
  */
-export type ConfiguredBindingRuleConfig = AgentBinding;
+// CLAW-FORK (multi-agent): intent bindings are resolved by the intent-router
+// tier, never compiled into channel binding rules — exclude them here.
+export type ConfiguredBindingRuleConfig = Exclude<AgentBinding, AgentIntentBinding>;
 
 /**
  * Stateful target descriptor produced by a binding consumer.

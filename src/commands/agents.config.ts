@@ -169,7 +169,10 @@ export function pruneAgentConfig(
   const nextAgents = nextAgentsList.length > 0 ? nextAgentsList : undefined;
 
   const bindings = cfg.bindings ?? [];
-  const filteredBindings = bindings.filter((binding) => normalizeAgentId(binding.agentId) !== id);
+  // CLAW-FORK (multi-agent): intent bindings carry no top-level agentId — keep them.
+  const filteredBindings = bindings.filter(
+    (binding) => !("agentId" in binding) || normalizeAgentId(binding.agentId) !== id,
+  );
 
   const allow = cfg.tools?.agentToAgent?.allow ?? [];
   const filteredAllow = allow.filter((entry) => entry !== id);

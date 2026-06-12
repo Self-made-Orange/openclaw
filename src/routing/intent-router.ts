@@ -1,0 +1,395 @@
+// CLAW-FORK (Phase 2, multi-agent design — hybrid port to v2026.6.6):
+// Intent-router classifier — picks which specialist agent should answer a
+// given inbound message. Invoked by `dispatch-from-config.ts` when
+// `resolveAgentRoute()` returns the synthetic `INTENT_PENDING_AGENT_ID`
+// sentinel (i.e., the inbound matched an `AgentIntentBinding` tier).
+//
+// Rule-based keyword classifier (latency 0, LLM cost 0). The LLM classifier
+// upgrade swaps the body of `classifyMessage` while keeping the same shape.
+//
+// Cache strategy: per-(channel, peerId, text-hash) TTL cache, default 300s.
+// In-flight de-duplication so concurrent inbound to the same channel don't
+// double-classify.
+//
+// NOTE (hybrid port): the fork's parentAgentMap / thread-inherit machinery was
+// intentionally dropped — upstream's `binding.peer.parent` tier plus per-thread
+// session keys plus the thread-sticky pinning below cover that case.
+
+import { createHash } from "node:crypto";
+import { listAgentIds } from "../agents/agent-scope-config.js";
+import { INTENT_PENDING_AGENT_ID, type AgentIntentBinding } from "../config/types.agents.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
+
+const log = createSubsystemLogger("intent-router");
+
+const DEFAULT_CACHE_TTL_SEC = 300;
+const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_FALLBACK_AGENT_ID = "main";
+
+export type IntentRouterDecision = {
+  /** Real agentId the dispatcher should route to. NEVER `INTENT_PENDING_AGENT_ID`. */
+  agentId: string;
+  /** Why this agent was chosen — for logging. */
+  reason: string;
+  /** Whether the decision came from the in-process cache. */
+  cached: boolean;
+  /** Whether the call hit the timeout / errored / used a fallback. */
+  fellBack: boolean;
+};
+
+type CacheEntry = {
+  decision: IntentRouterDecision;
+  expiresAt: number;
+};
+
+const cache = new Map<string, CacheEntry>();
+const inflight = new Map<string, Promise<IntentRouterDecision>>();
+
+// Sticky-thread map: pins a resolved agentId to a thread for the lifetime of
+// this gateway process so subsequent messages in the same thread skip
+// classification and route consistently to the same agent.
+// NOTE: In-process memory only — evaporates on gateway restart.
+type StickyThreadEntry = {
+  agentId: string;
+  /** Preserved alongside agentId so the sticky can degrade gracefully if the
+   *  pinned agent is later removed from config mid-session. */
+  fallbackAgentId: string;
+};
+const stickyThreadMap = new Map<string, StickyThreadEntry>();
+
+function pruneExpired(now: number): void {
+  for (const [k, v] of cache) {
+    if (v.expiresAt <= now) cache.delete(k);
+  }
+}
+
+function buildCacheKey(params: {
+  channel: string;
+  accountId?: string;
+  peerId?: string;
+  text: string;
+  routerAgentId: string;
+}): string {
+  const hash = createHash("sha1");
+  hash.update(params.routerAgentId);
+  hash.update("\x00");
+  hash.update(params.channel);
+  hash.update("\x00");
+  hash.update(params.accountId ?? "");
+  hash.update("\x00");
+  hash.update(params.peerId ?? "");
+  hash.update("\x00");
+  hash.update(params.text);
+  return hash.digest("hex");
+}
+
+function validateAgentId(cfg: OpenClawConfig, candidate: string): boolean {
+  if (candidate === INTENT_PENDING_AGENT_ID) return false;
+  const known = new Set(listAgentIds(cfg));
+  if (!known.has(candidate)) return false;
+  return true;
+}
+
+function resolveFallback(cfg: OpenClawConfig, binding: AgentIntentBinding): string {
+  const candidate = binding.router.fallbackAgentId ?? DEFAULT_FALLBACK_AGENT_ID;
+  if (validateAgentId(cfg, candidate)) return candidate;
+  // Nuclear fallback — agents.list is empty or fallback misconfigured.
+  // listAgentIds() always returns at least "main" (DEFAULT_AGENT_ID) per
+  // agent-scope-config.ts behavior, so this should be safe.
+  const known = listAgentIds(cfg);
+  return known[0] ?? "main";
+}
+
+// Rule-based keyword classifier. Order matters — first match wins.
+// Tighter/more-specific rules go higher
+// (envelope > search > code > wiki > envelope_quick > default).
+type ClassifierRule = {
+  /** Target agentId. Must exist in cfg.agents.list[] or fallback engages. */
+  agentId: string;
+  /** Why this matched — surfaced as `decision.reason` for log/`/agents trace`. */
+  reason: string;
+  /** Regex tested against the inbound text. */
+  re: RegExp;
+};
+
+const KEYWORD_RULES: ClassifierRule[] = [
+  // High-signal "make me a thing" requests → envelope/HTML pipeline.
+  {
+    agentId: "envelope",
+    reason: "keyword:envelope (만들어/정리/비교/리포트/분석/chart/diagram)",
+    re: /(만들어|정리해|비교해|리포트|분석해|envelope|html|chart|graph|diagram|보고서|문서로)/i,
+  },
+  // Time-sensitive / external entity → search agent.
+  {
+    agentId: "search",
+    reason: "keyword:search (검색/뉴스/오늘/최신)",
+    re: /(검색해|찾아줘|최신|뉴스|오늘|어제|최근|search\b|news\b|today)/i,
+  },
+  // Code work — repo edits, refactors, debug.
+  {
+    agentId: "code",
+    reason: "keyword:code (코드/refactor/구현/debug)",
+    re: /(코드\b|구현해|refactor|리팩토|PR\b|타입스크립트|typescript|python|debug|버그|에러|exception)/i,
+  },
+  // Vault / knowledge management.
+  {
+    agentId: "wiki",
+    reason: "keyword:wiki (vault/저장/ingest/메모리)",
+    re: /(wiki\b|vault\b|저장해|ingest\b|메모리|기록해|note\b|노트)/i,
+  },
+  // Quick acknowledgements / short FYI → envelope (cheap haiku) by length.
+  // Applied last because it's a length heuristic rather than content.
+];
+
+const SHORT_ACK_LIMIT_CHARS = 30;
+const SHORT_ACK_AGENT_ID = "envelope";
+
+function classifyByKeyword(
+  cfg: OpenClawConfig,
+  binding: AgentIntentBinding,
+  text: string,
+): { agentId: string; reason: string; fellBack: boolean } {
+  const trimmed = (text ?? "").trim();
+  if (!trimmed) {
+    return {
+      agentId: resolveFallback(cfg, binding),
+      reason: "empty-text → fallback",
+      fellBack: true,
+    };
+  }
+  for (const rule of KEYWORD_RULES) {
+    if (rule.re.test(trimmed)) {
+      return { agentId: rule.agentId, reason: rule.reason, fellBack: false };
+    }
+  }
+  // Length heuristic — short ack-style messages.
+  if (trimmed.length <= SHORT_ACK_LIMIT_CHARS) {
+    return {
+      agentId: SHORT_ACK_AGENT_ID,
+      reason: `short-ack (≤${SHORT_ACK_LIMIT_CHARS} chars)`,
+      fellBack: false,
+    };
+  }
+  return {
+    agentId: resolveFallback(cfg, binding),
+    reason: "no-keyword-match → fallback",
+    fellBack: true,
+  };
+}
+
+async function classifyMessage(params: {
+  text: string;
+  cfg: OpenClawConfig;
+  binding: AgentIntentBinding;
+  timeoutMs: number;
+}): Promise<{ agentId: string; reason: string; fellBack: boolean }> {
+  // Rule-based — synchronous in spirit but kept async for the LLM upgrade.
+  return classifyByKeyword(params.cfg, params.binding, params.text);
+}
+
+export type ResolveIntentAgentParams = {
+  cfg: OpenClawConfig;
+  binding: AgentIntentBinding;
+  channel: string;
+  accountId?: string;
+  peerId?: string;
+  text: string;
+};
+
+/**
+ * Resolve an inbound message to a real agentId via the intent-router agent.
+ *
+ * Caching, in-flight dedupe, validation, and fallback are all handled here.
+ * The dispatcher just calls this when it sees `INTENT_PENDING_AGENT_ID`.
+ */
+export async function resolveIntentAgent(
+  params: ResolveIntentAgentParams,
+): Promise<IntentRouterDecision> {
+  const cacheTtlSec = params.binding.router.cacheTtlSec ?? DEFAULT_CACHE_TTL_SEC;
+  const timeoutMs = params.binding.router.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const cacheKey = buildCacheKey({
+    channel: params.channel,
+    accountId: params.accountId,
+    peerId: params.peerId,
+    text: params.text,
+    routerAgentId: params.binding.router.agentId,
+  });
+
+  const now = Date.now();
+  pruneExpired(now);
+
+  // Cache hit — fast path.
+  const cached = cache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    log.debug(`cache hit → ${cached.decision.agentId} (${cached.decision.reason})`, {
+      cacheKey: cacheKey.slice(0, 12),
+    });
+    return { ...cached.decision, cached: true };
+  }
+
+  // In-flight dedupe — concurrent inbound to same key awaits the first.
+  const pending = inflight.get(cacheKey);
+  if (pending) {
+    log.debug("awaiting in-flight classifier", { cacheKey: cacheKey.slice(0, 12) });
+    return pending;
+  }
+
+  const promise = (async (): Promise<IntentRouterDecision> => {
+    try {
+      const result = await Promise.race([
+        classifyMessage({
+          text: params.text,
+          cfg: params.cfg,
+          binding: params.binding,
+          timeoutMs,
+        }),
+        new Promise<{ agentId: string; reason: string; fellBack: boolean }>((_, reject) =>
+          setTimeout(() => reject(new Error("intent-router timeout")), timeoutMs).unref(),
+        ),
+      ]);
+      const validated = validateAgentId(params.cfg, result.agentId)
+        ? result.agentId
+        : resolveFallback(params.cfg, params.binding);
+      const decision: IntentRouterDecision = {
+        agentId: validated,
+        reason:
+          validated === result.agentId
+            ? result.reason
+            : `${result.reason} (invalid agentId, used fallback)`,
+        cached: false,
+        fellBack: result.fellBack || validated !== result.agentId,
+      };
+      cache.set(cacheKey, {
+        decision,
+        expiresAt: Date.now() + cacheTtlSec * 1_000,
+      });
+      log.debug(`classified → ${decision.agentId} (${decision.reason})`, {
+        cacheKey: cacheKey.slice(0, 12),
+      });
+      return decision;
+    } catch (err) {
+      const fallback = resolveFallback(params.cfg, params.binding);
+      const decision: IntentRouterDecision = {
+        agentId: fallback,
+        reason: `classifier-error: ${String(err instanceof Error ? err.message : err)}`,
+        cached: false,
+        fellBack: true,
+      };
+      log.warn(`classifier failed, used fallback → ${fallback}`, { err: String(err) });
+      // Negative cache for a short window so we don't hammer the failing
+      // classifier on every retry. Half the configured TTL, capped at 60s.
+      cache.set(cacheKey, {
+        decision,
+        expiresAt: Date.now() + Math.min(cacheTtlSec * 500, 60_000),
+      });
+      return decision;
+    } finally {
+      inflight.delete(cacheKey);
+    }
+  })();
+
+  inflight.set(cacheKey, promise);
+  return promise;
+}
+
+/**
+ * Find an `AgentIntentBinding` matching the inbound channel/peer, if any.
+ * Used by `resolve-route.ts` to know whether to surface the
+ * `INTENT_PENDING_AGENT_ID` sentinel.
+ *
+ * Returns the FIRST matching intent binding (peer-specific match preferred
+ * over channel-only by config ordering — caller should sort accordingly).
+ */
+export function findIntentBinding(params: {
+  cfg: OpenClawConfig;
+  channel: string;
+  accountId?: string;
+  peerId?: string;
+}): AgentIntentBinding | undefined {
+  const bindings = params.cfg.bindings;
+  if (!Array.isArray(bindings)) return undefined;
+  const channel = params.channel.toLowerCase();
+  // peer.id comparison MUST be case-insensitive: other binding tiers normalize
+  // inbound peer.id to lowercase (Slack channel id `C0ATZBA2EKX` arrives as
+  // `c0atzba2ekx`), but user-authored binding configs typically keep the
+  // original Slack uppercase ID. Without lowercasing both sides, every intent
+  // binding silently mismatches.
+  const inboundPeerId = params.peerId?.toLowerCase();
+  const inboundAccountId = params.accountId?.toLowerCase();
+  for (const b of bindings) {
+    if (b.type !== "intent") continue;
+    if (b.match.channel.toLowerCase() !== channel) continue;
+    // Account scope (optional, case-insensitive)
+    if (b.match.accountId) {
+      if (!inboundAccountId) continue;
+      if (b.match.accountId.toLowerCase() !== inboundAccountId) continue;
+    }
+    // Peer scope (optional, case-insensitive)
+    if (b.match.peer) {
+      if (!inboundPeerId) continue;
+      if (b.match.peer.id.toLowerCase() !== inboundPeerId) continue;
+    }
+    return b;
+  }
+  return undefined;
+}
+
+/**
+ * Extract the canonical thread key from a sessionKey, or undefined if the
+ * message is not part of a thread.
+ *
+ * SessionKey format: `agent:<agentId>:<channel>:<type>:<peerId>[:thread:<tid>]`
+ * Thread key (returned): `<channel>:<type>:<peerId>:thread:<tid>`
+ */
+export function extractThreadKeyFromSessionKey(sessionKey: string): string | undefined {
+  if (!sessionKey.includes(":thread:")) return undefined;
+  const match = sessionKey.match(/^agent:[^:]+:(.+)$/);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Pin a resolved agentId to a thread for the lifetime of this gateway process.
+ * Subsequent messages in the same thread skip classification and use this agent
+ * (thread consistency priority over fresh classification).
+ *
+ * NOTE: stored in process memory — evaporates on gateway restart.
+ *
+ * @param threadKey       Canonical thread identifier — use {@link extractThreadKeyFromSessionKey}.
+ * @param agentId         The resolved agentId to pin.
+ * @param fallbackAgentId The binding's fallback, preserved for graceful degradation.
+ */
+export function setStickyThreadAgent(
+  threadKey: string,
+  agentId: string,
+  fallbackAgentId: string,
+): void {
+  stickyThreadMap.set(threadKey, { agentId, fallbackAgentId });
+}
+
+/**
+ * Return the sticky routing decision for a thread if one was set in this
+ * process lifetime, and emit the grep-friendly log line.
+ * Returns undefined for non-thread messages or for the first message in a thread.
+ *
+ * NOTE: evaporates on gateway restart.
+ */
+export function checkStickyThreadAgent(threadKey: string): IntentRouterDecision | undefined {
+  const entry = stickyThreadMap.get(threadKey);
+  if (!entry) return undefined;
+  // Grep-friendly: [intent-router] thread-sticky:<agentId> hit for <threadKey>
+  log.debug(`thread-sticky:${entry.agentId} hit for ${threadKey}`);
+  return {
+    agentId: entry.agentId,
+    reason: `thread-sticky (fallback=${entry.fallbackAgentId})`,
+    cached: false,
+    fellBack: false,
+  };
+}
+
+// Test-only escape hatch. Not exported from package index — only the test file imports it.
+export function __resetIntentRouterCacheForTesting(): void {
+  cache.clear();
+  inflight.clear();
+  stickyThreadMap.clear();
+}

@@ -50,7 +50,7 @@ function collectReferencedAgentIds(cfg: OpenClawConfig): string[] {
   const bindings = cfg.bindings;
   if (Array.isArray(bindings)) {
     for (const binding of bindings) {
-      const id = binding?.agentId;
+      const id = binding && "agentId" in binding ? binding.agentId : undefined;
       if (typeof id === "string" && id.trim()) {
         ids.add(normalizeAgentId(id));
       }
