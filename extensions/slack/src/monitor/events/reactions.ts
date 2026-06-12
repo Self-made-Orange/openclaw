@@ -1,4 +1,6 @@
 // Slack plugin module implements reactions behavior.
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import type { SlackEventMiddlewareArgs } from "@slack/bolt";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { danger } from "openclaw/plugin-sdk/runtime-env";
@@ -7,6 +9,51 @@ import { allowListMatches, normalizeAllowListLower } from "../allow-list.js";
 import type { SlackMonitorContext } from "../context.js";
 import type { SlackReactionEvent } from "../types.js";
 import { authorizeAndResolveSlackSystemEventContext } from "./system-event-context.js";
+
+// CLAW-FORK: positive emoji aliases — silent logging fast-path.
+// `:+1:` / `:thumbsup:` (👍) — 표준 thumbs up
+// `:white_check_mark:` (✅) — "확인" / "동의" / "approved" 의미로 흔히 쓰임
+// `:heavy_check_mark:` (✔) — 같은 ✓ 계열
+// `:ok_hand:` (👌) — 한국어권에서 thumbs up 대체로 자주 사용
+// `:heart:` (❤️) — strong positive 시그널
+// LLM agent run 발화 안 하고 fast-path 으로 직접
+// wiki/_format-feedback/positive.md 에 append. 0 latency + 0 토큰.
+const POSITIVE_EMOJI = new Set([
+  "+1",
+  "thumbsup",
+  "white_check_mark",
+  "heavy_check_mark",
+  "ok_hand",
+  "heart",
+]);
+
+async function fastLogPositiveReaction(params: {
+  channelLabel: string;
+  channelId?: string;
+  msgTs?: string;
+  reactor: string;
+  authorLabel?: string;
+}): Promise<void> {
+  const home = process.env.HOME;
+  if (!home) return;
+  const positivePath = path.resolve(home, "wiki/_format-feedback/positive.md");
+  // 파일이 아직 없거나 디렉토리 누락이면 silent skip — 사용자가 vault 셋업 하면
+  // 자연스럽게 동작 시작. 굳이 만들지 않음.
+  try {
+    await fs.access(positivePath);
+  } catch {
+    return;
+  }
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const min = String(now.getMinutes()).padStart(2, "0");
+  const stamp = `${yyyy}-${mm}-${dd} ${hh}:${min}`;
+  const entry = `\n## ${stamp} | quick-log | reactor: ${params.reactor}\n- channel: \`${params.channelId ?? params.channelLabel}\`\n- msg ts: \`${params.msgTs ?? ""}\`\n- author: \`${params.authorLabel ?? ""}\`\n- block analysis: pending (synth)\n`;
+  await fs.appendFile(positivePath, entry, "utf-8");
+}
 
 function shouldEmitSlackReactionNotification(params: {
   ctx: SlackMonitorContext;
@@ -72,6 +119,36 @@ export function registerSlackReactionEvents(params: {
         ? ctx.resolveUserName(event.item_user)
         : Promise.resolve(undefined);
       const [actorInfo, authorInfo] = await Promise.all([actorInfoPromise, authorInfoPromise]);
+
+      // CLAW-FORK fast-path: positive emoji on the bot's own message → silent
+      // logging. 첨부 송출 / 답글 / agent run 모두 필요 없음 — 직접 file append
+      // 만 하고 0-latency 종료 (no agent dispatch, 0 토큰).
+      // `removed` 는 무시 (이미 로깅된 entry 는 synth 가 dedupe / cleanup).
+      const isOwnMessage = Boolean(ctx.botUserId && event.item_user === ctx.botUserId);
+      const fastEmojiLabel = event.reaction ?? "emoji";
+      if (isOwnMessage && POSITIVE_EMOJI.has(fastEmojiLabel)) {
+        if (action === "added") {
+          try {
+            await fastLogPositiveReaction({
+              channelLabel: ingressContext.channelLabel,
+              channelId: item.channel,
+              msgTs: item.ts,
+              reactor: actorInfo?.name ?? event.user ?? "unknown",
+              authorLabel: authorInfo?.name ?? event.item_user,
+            });
+            ctx.runtime.log?.(
+              `[claw-debug] reaction :+1: silent-logged (no wake): channel=${item.channel} msg=${item.ts}`,
+            );
+          } catch (err) {
+            ctx.runtime.error?.(
+              danger(`fast-path positive log failed: ${formatErrorMessage(err)}`),
+            );
+          }
+        }
+        // :+1: 토글 취소 (removed): 아무것도 안 함 (이미 silent-logged 된 entry 도 그대로).
+        return;
+      }
+
       if (
         !shouldEmitSlackReactionNotification({
           ctx,
