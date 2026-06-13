@@ -3253,19 +3253,6 @@ export async function dispatchReplyFromConfig(
         setReplyPayloadMetadata(reply, { toolCallNames: turnToolCallNames });
       }
     }
-    // CLAW-FORK 2026-06-13 (HIGH-4): stamp the producing agentId onto every final
-    // reply payload (same WeakMap channel as toolCallNames above) so the Slack
-    // outbound reviewer hook can resolve the per-agent `responseReviewer` policy.
-    // Previously the reviewer tried to recover agentId from a non-existent
-    // `payload.sessionKey`, so the policy was always undefined and the reviewer
-    // ran for every agent. Additive only — does not touch sentinel/session-key
-    // logic.
-    if (sessionAgentId) {
-      for (const reply of replies) {
-        if (getReplyPayloadMetadata(reply)?.agentId) continue;
-        setReplyPayloadMetadata(reply, { agentId: sessionAgentId });
-      }
-    }
     // Backstop: silent/streaming-delivered turns end without a visible final
     // reply; trailing commentary must still land.
     await flushPendingCommentaryProgress();

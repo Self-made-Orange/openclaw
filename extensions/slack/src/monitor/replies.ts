@@ -9,7 +9,6 @@ import {
 } from "openclaw/plugin-sdk/reply-chunking";
 import {
   deliverTextOrMediaReply,
-  getReplyPayloadMetadata,
   resolveSendableOutboundReplyParts,
   type ReplyPayload,
 } from "openclaw/plugin-sdk/reply-payload";
@@ -18,32 +17,10 @@ import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { markdownToSlackMrkdwnChunks } from "../format.js";
 import { SLACK_TEXT_LIMIT } from "../limits.js";
 import { resolveSlackReplyBlocks } from "../reply-blocks.js";
-// CLAW-FORK (ported to v2026.6.6 base): outbound-response reviewer agent call.
-// Filter-mode: reject appends a footer + records the reject; never blocks send.
-import { callReviewer, recordReviewerReject } from "./reviewer-call.js";
 import { sendMessageSlack, type SlackSendIdentity } from "./send.runtime.js";
 
 export function readSlackReplyBlocks(payload: ReplyPayload) {
   return resolveSlackReplyBlocks(payload);
-}
-
-// CLAW-FORK 2026-06-13 (HIGH-4): resolve the producing agentId from the reply
-// payload's WeakMap metadata, where dispatch-from-config.ts now stamps it
-// (alongside toolCallNames). The old implementation read `payload.sessionKey` /
-// `payload.metadata.sessionKey`, which are NEVER set on Slack reply payloads —
-// so agentId was always undefined, the per-agent `responseReviewer` policy was
-// always undefined, and the reviewer ran for every agent. We keep a fallback to
-// the legacy sessionKey fields for safety, but the metadata stamp is the path
-// that actually fires.
-function extractAgentIdFromPayload(payload: ReplyPayload): string | undefined {
-  const stamped = getReplyPayloadMetadata(payload)?.agentId;
-  if (typeof stamped === "string" && stamped) return stamped;
-  const sessionKey =
-    (payload as { sessionKey?: unknown }).sessionKey ??
-    (payload as { metadata?: { sessionKey?: unknown } }).metadata?.sessionKey;
-  if (typeof sessionKey !== "string" || !sessionKey) return undefined;
-  const match = sessionKey.match(/^agent:([a-z0-9_-]+):/i);
-  return match ? match[1] : undefined;
 }
 
 export function resolveDeliveredSlackReplyThreadTs(params: {
@@ -79,79 +56,8 @@ export async function deliverReplies(params: {
       payloadReplyToId: payload.replyToId,
       replyThreadTs: params.replyThreadTs,
     });
-    let reply = resolveSendableOutboundReplyParts(payload);
+    const reply = resolveSendableOutboundReplyParts(payload);
     const slackBlocks = readSlackReplyBlocks(payload);
-
-    // CLAW-FORK (Phase 6 D4, multi-agent; ported to v2026.6.6 base): reviewer
-    // hook. Fired ONCE per reply payload, before any send-branch resolution,
-    // so every outbound reply (text-only, blocks, media) is reviewed exactly
-    // once.
-    //
-    // Filter (not gate) policy: full-block reject is data-loss for the user.
-    // On reject we SHIP the answer + append a small footer + record the reject
-    // for later prompt iteration. Reviewer error/timeout → fail-safe approve.
-    {
-      const draftReply =
-        reply.trimmedText ||
-        (typeof (payload as { text?: string }).text === "string"
-          ? (payload as { text: string }).text
-          : "");
-      if (draftReply) {
-        // Tool call names are stamped on the payload's metadata (WeakMap-backed)
-        // by dispatch-from-config.ts.
-        const toolCallNames = getReplyPayloadMetadata(payload)?.toolCallNames;
-        // CLAW-FORK 2026-06-13 (HIGH-4): reviewer is OPT-IN. It runs ONLY when the
-        // producing agent has `agents.list[].responseReviewer === "on"`. Any other
-        // value (absent / "off" / unknown) means NO reviewer call — so the default
-        // (no key set) is no Moonshot call, instead of running for every agent.
-        const reviewerAgentId = extractAgentIdFromPayload(payload);
-        const reviewerPolicy = reviewerAgentId
-          ? params.cfg.agents?.list?.find((entry) => entry.id === reviewerAgentId)?.responseReviewer
-          : undefined;
-        if (reviewerPolicy !== "on") {
-          params.runtime.log?.(
-            `[claw-debug] reviewer: skipped for ${reviewerAgentId ?? "unknown"} (responseReviewer!=on)`,
-          );
-        } else
-          try {
-            const verdict = await callReviewer({
-              agentId: reviewerAgentId,
-              isChannelRoot: !threadTs,
-              draftReply,
-              toolCallNames,
-            });
-            params.runtime.log?.(
-              `[claw-debug] reviewer: verdict=${verdict.verdict} reason="${verdict.reason}" ${verdict.durationMs}ms${verdict.fellBack ? " (fallback)" : ""}`,
-            );
-            if (verdict.verdict === "reject") {
-              recordReviewerReject({
-                ts: new Date().toISOString(),
-                agentId: reviewerAgentId,
-                draftReply,
-                reason: verdict.reason,
-                durationMs: verdict.durationMs,
-              });
-              const footer = `\n\n_⚠️ reviewer: ${verdict.reason.slice(0, 200)}_`;
-              const mut = payload as { text?: string };
-              if (typeof mut.text === "string" && mut.text) {
-                mut.text = `${mut.text}${footer}`;
-              } else {
-                mut.text = `${draftReply}${footer}`;
-              }
-              // Re-resolve so reply.trimmedText / hasContent reflect the
-              // footer-suffixed body for the downstream send branches.
-              reply = resolveSendableOutboundReplyParts(payload);
-              params.runtime.log?.(
-                `[claw-debug] reviewer: appended reject footer (${verdict.reason.slice(0, 60)}) — proceeding with send`,
-              );
-            }
-          } catch {
-            // Reviewer threw outside its own fail-safe (shouldn't happen) —
-            // proceed with normal send to avoid blocking on a broken side-channel.
-            params.runtime.log?.("[claw-debug] reviewer: unexpected throw; proceeding with send");
-          }
-      }
-    }
 
     if (!reply.hasContent && !slackBlocks?.length) {
       continue;

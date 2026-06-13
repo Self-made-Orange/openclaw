@@ -196,21 +196,6 @@ export type AgentConfig = {
   tools?: AgentToolsConfig;
   /** Optional runtime descriptor for this agent. */
   runtime?: AgentRuntimeConfig;
-  /**
-   * CLAW-FORK: optional per-agent outbound-response reviewer policy.
-   * Named `responseReviewer` (not `reviewer`) to avoid confusion with the
-   * upstream exec-approval reviewer at `tools.exec.reviewer`.
-   *
-   * OPT-IN (CLAW-FORK 2026-06-13 HIGH-4): the reviewer runs ONLY when this is
-   * explicitly "on". This avoids a per-reply Moonshot call (up to ~8s serial)
-   * for agents that don't need outbound review.
-   * - "on": runtime reviewer hook validates outbound replies and may append a
-   *   reject footer.
-   * - "off" / absent (default): skip reviewer entirely. Use for direct-to-user
-   *   agents where the user is the deployment-gate (e.g. self-improve reviews via
-   *   branch diff; data-analyst bots verify against external dashboards).
-   */
-  responseReviewer?: "on" | "off";
 };
 
 export type AgentsConfig = {
