@@ -48,7 +48,10 @@ import {
   resolveSendableOutboundReplyParts,
 } from "openclaw/plugin-sdk/reply-payload";
 import type { ReplyDispatchKind, ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
-import { resolveInboundLastRouteSessionKey } from "openclaw/plugin-sdk/routing";
+import {
+  resolveAgentIdFromSessionKey,
+  resolveInboundLastRouteSessionKey,
+} from "openclaw/plugin-sdk/routing";
 import { danger, logVerbose, shouldLogVerbose, sleep } from "openclaw/plugin-sdk/runtime-env";
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -1642,6 +1645,29 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       storePath: prepared.turn.storePath,
       ctxPayload: prepared.ctxPayload,
       recordInboundSession,
+      // CLAW-FORK (multi-agent intent routing): when the route carries the
+      // `__intent_pending__` sentinel, the inbound session record is deferred
+      // by the channel-turn kernel until dispatch resolves the real agent and
+      // rewrites ctxPayload.SessionKey. Recompute the storePath from the
+      // resolved sessionKey so the record lands under the real agent's dir.
+      resolveDeferredRecordTarget: () => {
+        const resolvedSessionKey = prepared.ctxPayload.SessionKey;
+        if (
+          typeof resolvedSessionKey !== "string" ||
+          // Sentinel agentId — `src/config/types.agents.ts` INTENT_PENDING_AGENT_ID
+          resolvedSessionKey.includes("agent:__intent_pending__:")
+        ) {
+          return undefined;
+        }
+        const resolvedAgentId = resolveAgentIdFromSessionKey(resolvedSessionKey);
+        if (!resolvedAgentId) {
+          return undefined;
+        }
+        const resolvedStorePath = resolveStorePath(cfg.session?.store, {
+          agentId: resolvedAgentId,
+        });
+        return { storePath: resolvedStorePath, sessionKey: resolvedSessionKey };
+      },
       dispatchReplyWithBufferedBlockDispatcher,
       dispatcherOptions: {
         ...replyPipeline,

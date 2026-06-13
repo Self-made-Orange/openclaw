@@ -94,7 +94,7 @@ import {
   extractThreadKeyFromSessionKey,
   findIntentBinding,
   resolveIntentAgent,
-  setStickyThreadAgent,
+  resolveStickyThreadAgentSingleFlight,
   type IntentRouterDecision,
 } from "../../routing/intent-router.js";
 import { isAcpSessionKey, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
@@ -1078,7 +1078,13 @@ export async function dispatchReplyFromConfig(
     // `agent:__intent_pending__:slack:channel:c0atzba2ekx[:thread:...]`).
     // Parse it out so findIntentBinding receives the same id that
     // resolveAgentRoute saw when it emitted the sentinel.
-    const sessionPeerMatch = pendingSessionKey.match(/:slack:(?:channel|direct|group|dm):([^:]+)/i);
+    // CLAW-FORK: channel segment is generic (not Slack-hardcoded) so the
+    // sentinel peer parse works for any channel that emits intent bindings.
+    // Live deployment is Slack-only today, but this avoids a silent mismatch
+    // if another channel later routes through the intent tier.
+    const sessionPeerMatch = pendingSessionKey.match(
+      /:[a-z0-9_-]+:(?:channel|direct|group|dm):([^:]+)/i,
+    );
     const sessionPeerId = sessionPeerMatch ? sessionPeerMatch[1] : undefined;
     const peerId = sessionPeerId ?? (typeof ctx.From === "string" ? ctx.From : undefined);
     const binding = findIntentBinding({ cfg, channel, accountId, peerId });
@@ -1096,16 +1102,8 @@ export async function dispatchReplyFromConfig(
       // port — upstream's binding.peer.parent tier + thread session keys +
       // the sticky pin below cover it.)
       const threadKey = extractThreadKeyFromSessionKey(pendingSessionKey);
-      const stickyDecision: IntentRouterDecision | undefined = threadKey
-        ? checkStickyThreadAgent(threadKey)
-        : undefined;
-      let decision: IntentRouterDecision;
-      let routeMatchedBySuffix = "";
-      if (stickyDecision) {
-        decision = stickyDecision;
-        routeMatchedBySuffix = ".thread-sticky";
-      } else {
-        decision = await resolveIntentAgent({
+      const classify = () =>
+        resolveIntentAgent({
           cfg,
           binding,
           channel,
@@ -1113,15 +1111,25 @@ export async function dispatchReplyFromConfig(
           peerId,
           text: messageText,
         });
-        // Pin the resolved agent to this thread so follow-up messages in the
-        // same thread route consistently without re-classifying.
-        if (threadKey) {
-          setStickyThreadAgent(
-            threadKey,
-            decision.agentId,
-            binding.router.fallbackAgentId ?? "main",
-          );
-        }
+      let decision: IntentRouterDecision;
+      let routeMatchedBySuffix = "";
+      if (threadKey) {
+        // Single-flight per thread: concurrent first messages converge on one
+        // decision (and one pin) instead of classifying independently and
+        // racing the sticky write — which would split the thread across two
+        // agent sessions. checkStickyThreadAgent + setStickyThreadAgent are
+        // handled inside the single-flight helper.
+        const before = checkStickyThreadAgent(threadKey);
+        decision = await resolveStickyThreadAgentSingleFlight({
+          threadKey,
+          fallbackAgentId: binding.router.fallbackAgentId ?? "main",
+          classify,
+        });
+        // Either an existing pin or a follower awaiting the first decision.
+        routeMatchedBySuffix =
+          before || decision.reason.startsWith("thread-sticky") ? ".thread-sticky" : "";
+      } else {
+        decision = await classify();
       }
       const resolvedKey = pendingSessionKey.replace(
         `agent:${INTENT_PENDING_AGENT_ID}:`,

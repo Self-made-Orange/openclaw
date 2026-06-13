@@ -58,6 +58,15 @@ type StickyThreadEntry = {
 };
 const stickyThreadMap = new Map<string, StickyThreadEntry>();
 
+// Single-flight guard for the FIRST resolution of a given thread. Two concurrent
+// first messages in the same thread (different text → different intent-router
+// cacheKey) would otherwise both miss the sticky map, classify independently,
+// and race to pin the thread — splitting the conversation across two agent
+// sessions (last writer wins). Keyed by threadKey: the first message stores its
+// in-progress decision Promise here at check-and-set time; concurrent followers
+// await it instead of classifying anew. Cleared in `finally` once the pin lands.
+const stickyInflight = new Map<string, Promise<IntentRouterDecision>>();
+
 function pruneExpired(now: number): void {
   for (const [k, v] of cache) {
     if (v.expiresAt <= now) cache.delete(k);
@@ -387,9 +396,60 @@ export function checkStickyThreadAgent(threadKey: string): IntentRouterDecision 
   };
 }
 
+/**
+ * Resolve the sticky agent for a thread with single-flight semantics on the
+ * FIRST message.
+ *
+ * Priority:
+ *   1. Existing sticky pin (thread already resolved earlier) → return it.
+ *   2. In-progress first resolution (concurrent first message) → await it, so
+ *      the whole thread converges on one decision instead of racing two
+ *      independent classifications and last-writer-wins pinning.
+ *   3. Otherwise this is the first message: register an in-flight Promise BEFORE
+ *      classifying (check-and-set), run `classify()`, pin the result, and clear
+ *      the in-flight entry.
+ *
+ * `classify` is supplied by the caller (the dispatcher) so this module stays
+ * agnostic about the classifier params — typically a thunk over
+ * {@link resolveIntentAgent}. Existing TTL / negative-cache behavior inside
+ * `resolveIntentAgent` is preserved; this guard sits one level above it.
+ */
+export function resolveStickyThreadAgentSingleFlight(params: {
+  threadKey: string;
+  fallbackAgentId: string;
+  classify: () => Promise<IntentRouterDecision>;
+}): Promise<IntentRouterDecision> {
+  const { threadKey, fallbackAgentId, classify } = params;
+
+  // 1. Already pinned — fast path (also emits the grep-friendly sticky log).
+  const existing = checkStickyThreadAgent(threadKey);
+  if (existing) return Promise.resolve(existing);
+
+  // 2. A concurrent first message is already resolving this thread.
+  const pending = stickyInflight.get(threadKey);
+  if (pending) {
+    log.debug(`thread-sticky single-flight: awaiting in-progress decision for ${threadKey}`);
+    return pending;
+  }
+
+  // 3. First message — check-and-set the in-flight Promise before classifying.
+  const promise = (async (): Promise<IntentRouterDecision> => {
+    try {
+      const decision = await classify();
+      setStickyThreadAgent(threadKey, decision.agentId, fallbackAgentId);
+      return decision;
+    } finally {
+      stickyInflight.delete(threadKey);
+    }
+  })();
+  stickyInflight.set(threadKey, promise);
+  return promise;
+}
+
 // Test-only escape hatch. Not exported from package index — only the test file imports it.
 export function __resetIntentRouterCacheForTesting(): void {
   cache.clear();
   inflight.clear();
   stickyThreadMap.clear();
+  stickyInflight.clear();
 }

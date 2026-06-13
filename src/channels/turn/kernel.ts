@@ -4,6 +4,7 @@ import {
   clearHistoryEntriesIfEnabled,
   recordPendingHistoryEntryWithMedia,
 } from "../../auto-reply/reply/history.js";
+import { INTENT_PENDING_AGENT_ID } from "../../config/types.agents.js";
 import {
   createDiagnosticTraceContextFromActiveScope,
   runWithDiagnosticTraceContext,
@@ -372,6 +373,7 @@ export async function dispatchAssembledChannelTurn(
       storePath: params.storePath,
       ctxPayload: params.ctxPayload,
       recordInboundSession: params.recordInboundSession,
+      resolveDeferredRecordTarget: params.resolveDeferredRecordTarget,
       record: params.record,
       history: params.history,
       admission: params.admission,
@@ -481,55 +483,99 @@ async function runPreparedChannelTurnCoreInTrace<
     clearPendingHistoryAfterTurn(params.history);
     return botLoopDrop;
   }
-  emit({
-    ...params,
-    event: {
-      stage: "record",
-      event: "start",
-      messageId: params.messageId,
-      sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-      admission: admission.kind,
-    },
-  });
-  try {
-    await params.recordInboundSession({
-      storePath: params.storePath,
-      sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-      ctx: params.ctxPayload,
-      groupResolution: params.record?.groupResolution,
-      createIfMissing: params.record?.createIfMissing,
-      updateLastRoute: params.record?.updateLastRoute,
-      onRecordError: params.record?.onRecordError ?? (() => undefined),
-      trackSessionMetaTask: params.record?.trackSessionMetaTask,
-    });
+  // CLAW-FORK (multi-agent intent routing): when the route session key carries
+  // the `__intent_pending__` sentinel, the real agent is only resolved inside
+  // dispatch. Recording the inbound session now would create a ghost
+  // `agents/__intent_pending__/` store and pin lastRoute to the sentinel. Defer
+  // the record until after dispatch resolves the real agent.
+  const recordSessionKey = params.ctxPayload.SessionKey ?? params.routeSessionKey;
+  const isIntentSentinelRecord =
+    typeof recordSessionKey === "string" &&
+    recordSessionKey.includes(`agent:${INTENT_PENDING_AGENT_ID}:`) &&
+    Boolean(params.resolveDeferredRecordTarget);
+
+  const recordInbound = async (
+    target: { storePath: string; sessionKey: string },
+    options?: { rewriteLastRouteFromSentinel?: boolean },
+  ) => {
+    // On the deferred (sentinel) path, the configured updateLastRoute.sessionKey
+    // was built from the sentinel route and still carries
+    // `agent:__intent_pending__:`. Swap its agent prefix for the resolved
+    // agent's so lastRoute is pinned to the real agent, not the ghost.
+    let updateLastRoute = params.record?.updateLastRoute;
+    if (options?.rewriteLastRouteFromSentinel && updateLastRoute) {
+      const resolvedAgentMatch = target.sessionKey.match(/^agent:([^:]+):/);
+      const resolvedPrefix = resolvedAgentMatch ? `agent:${resolvedAgentMatch[1]}:` : undefined;
+      if (
+        resolvedPrefix &&
+        updateLastRoute.sessionKey.includes(`agent:${INTENT_PENDING_AGENT_ID}:`)
+      ) {
+        updateLastRoute = {
+          ...updateLastRoute,
+          sessionKey: updateLastRoute.sessionKey.replace(
+            `agent:${INTENT_PENDING_AGENT_ID}:`,
+            resolvedPrefix,
+          ),
+        };
+      }
+    }
     emit({
       ...params,
       event: {
         stage: "record",
-        event: "done",
+        event: "start",
         messageId: params.messageId,
-        sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
+        sessionKey: target.sessionKey,
         admission: admission.kind,
-      },
-    });
-  } catch (err) {
-    emit({
-      ...params,
-      event: {
-        stage: "record",
-        event: "error",
-        messageId: params.messageId,
-        sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-        admission: admission.kind,
-        error: err,
       },
     });
     try {
-      await params.onPreDispatchFailure?.(err);
-    } catch {
-      // Preserve the original session-recording error.
+      await params.recordInboundSession({
+        storePath: target.storePath,
+        sessionKey: target.sessionKey,
+        ctx: params.ctxPayload,
+        groupResolution: params.record?.groupResolution,
+        createIfMissing: params.record?.createIfMissing,
+        updateLastRoute,
+        onRecordError: params.record?.onRecordError ?? (() => undefined),
+        trackSessionMetaTask: params.record?.trackSessionMetaTask,
+      });
+      emit({
+        ...params,
+        event: {
+          stage: "record",
+          event: "done",
+          messageId: params.messageId,
+          sessionKey: target.sessionKey,
+          admission: admission.kind,
+        },
+      });
+    } catch (err) {
+      emit({
+        ...params,
+        event: {
+          stage: "record",
+          event: "error",
+          messageId: params.messageId,
+          sessionKey: target.sessionKey,
+          admission: admission.kind,
+          error: err,
+        },
+      });
+      try {
+        await params.onPreDispatchFailure?.(err);
+      } catch {
+        // Preserve the original session-recording error.
+      }
+      throw err;
     }
-    throw err;
+  };
+
+  if (!isIntentSentinelRecord) {
+    await recordInbound({
+      storePath: params.storePath,
+      sessionKey: recordSessionKey,
+    });
   }
 
   emit({
@@ -573,6 +619,18 @@ async function runPreparedChannelTurnCoreInTrace<
     },
   });
   clearPendingHistoryAfterTurn(params.history);
+
+  // CLAW-FORK (multi-agent intent routing): dispatch has now rewritten
+  // ctxPayload.SessionKey from the sentinel to the resolved agent. Run the
+  // deferred inbound session record against the real storePath/sessionKey so
+  // the session meta + lastRoute land under the resolved agent's dir, never
+  // under `agents/__intent_pending__/`.
+  if (isIntentSentinelRecord) {
+    const deferredTarget = params.resolveDeferredRecordTarget?.();
+    if (deferredTarget) {
+      await recordInbound(deferredTarget, { rewriteLastRouteFromSentinel: true });
+    }
+  }
 
   return {
     admission,
