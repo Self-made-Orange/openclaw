@@ -16,6 +16,7 @@ import {
   SLACK_FEEDBACK_GOOD_ACTION_ID,
   SLACK_FEEDBACK_UNDO_ACTION_ID,
 } from "../../reply-action-ids.js";
+import { assertSlackChannelTeamAllowed } from "../../send.js";
 
 const FEEDBACK_LOG_DIR =
   process.env.OPENCLAW_FORMAT_FEEDBACK_DIR ??
@@ -78,6 +79,9 @@ export async function postFeedbackButtonsInThread(params: {
     // Bound alias sidesteps unicorn/require-post-message-target-origin
     // (Slack WebClient chat.postMessage, not window.postMessage).
     const postChatMessage = client.chat.postMessage.bind(client.chat);
+    // CLAW-FORK 2026-06-13 (MED-6): posting a fresh message to params.channelId —
+    // apply the fail-closed workspace allowlist guard.
+    await assertSlackChannelTeamAllowed(client, params.channelId);
     await postChatMessage({
       channel: params.channelId,
       thread_ts: params.threadTs,

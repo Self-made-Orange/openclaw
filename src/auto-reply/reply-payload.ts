@@ -165,6 +165,13 @@ export type ReplyPayloadMetadata = {
    */
   toolCallNames?: string[];
   /**
+   * CLAW-FORK 2026-06-13 (HIGH-4): the agent id that produced this reply,
+   * stamped at dispatch time. Slack reply payloads carry no agentId of their
+   * own, so the outbound reviewer hook reads it from here to apply the per-agent
+   * `responseReviewer` opt-in policy. Stamped next to `toolCallNames`.
+   */
+  agentId?: string;
+  /**
    * Internal OpenClaw notices generated after a runtime/provider failure are
    * not assistant source replies. Dispatch may deliver them even when normal
    * assistant source replies are message-tool-only; sendPolicy deny still wins.

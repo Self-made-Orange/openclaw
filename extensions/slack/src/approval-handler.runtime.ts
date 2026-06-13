@@ -26,7 +26,7 @@ import {
 } from "./approval-native-gates.js";
 import { normalizeSlackApproverId } from "./exec-approvals.js";
 import { resolveSlackReplyBlocks } from "./reply-blocks.js";
-import { sendMessageSlack } from "./send.js";
+import { assertSlackChannelTeamAllowed, sendMessageSlack } from "./send.js";
 import { truncateSlackText } from "./truncate.js";
 
 type SlackBlock = Block | KnownBlock;
@@ -408,6 +408,9 @@ async function updateMessage(params: {
   blocks: SlackBlock[];
 }): Promise<void> {
   try {
+    // CLAW-FORK 2026-06-13 (MED-6): fail-closed workspace allowlist guard before
+    // updating an approval message in an arbitrary channel id.
+    await assertSlackChannelTeamAllowed(params.app.client, params.channelId);
     await params.app.client.chat.update({
       channel: params.channelId,
       ts: params.messageTs,

@@ -17,8 +17,16 @@
  * abstract validator across packages.
  */
 
-const INTERACTIVE_FENCE_RE = /```openclaw-interactive\s*\n([\s\S]*?)```/g;
-const JSON_INTERACTIVE_FENCE_RE = /```json\s*\n([\s\S]*?)```/g;
+// CLAW-FORK 2026-06-13 (MED-5): fence regexes are now imported from the shared
+// core module (single source of truth) so this cron-announce parser and the
+// reply path (src/auto-reply/reply/reply-delivery.ts) can no longer diverge on
+// closing-fence handling. Previously this file used a looser close
+// (`([\s\S]*?)```` with no required newline, no `openclaw-blocks` alias,
+// case-sensitive); we now share the stricter `\n```` form.
+import {
+  getInteractiveFenceRe,
+  getJsonInteractiveFenceRe,
+} from "openclaw/plugin-sdk/interactive-fence";
 
 export interface FenceExtractionResult {
   text: string;
@@ -52,7 +60,7 @@ export function extractClawInteractiveFence(text: string): FenceExtractionResult
     return looksRaw ? blocks : [];
   };
 
-  stripped = stripped.replace(INTERACTIVE_FENCE_RE, (match, body: string) => {
+  stripped = stripped.replace(getInteractiveFenceRe(), (match, body: string) => {
     try {
       rawBlocks = rawBlocks.concat(collectFromParsed(JSON.parse(body)));
       return "";
@@ -62,7 +70,7 @@ export function extractClawInteractiveFence(text: string): FenceExtractionResult
   });
 
   if (hasJsonFallback) {
-    stripped = stripped.replace(JSON_INTERACTIVE_FENCE_RE, (match, body: string) => {
+    stripped = stripped.replace(getJsonInteractiveFenceRe(), (match, body: string) => {
       try {
         const parsed = JSON.parse(body) as Record<string, unknown>;
         if (parsed && parsed.type === "openclaw-interactive") {

@@ -10,7 +10,7 @@ import { createSlackWebClient, getSlackWriteClient } from "./client.js";
 import { buildSlackEditTextPayload } from "./edit-text.js";
 import { resolveSlackMedia } from "./monitor/media.js";
 import type { SlackMediaResult } from "./monitor/media.js";
-import { sendMessageSlack } from "./send.js";
+import { assertSlackChannelTeamAllowed, sendMessageSlack } from "./send.js";
 import { resolveSlackBotToken } from "./token.js";
 
 export type SlackActionClientOpts = {
@@ -276,6 +276,9 @@ export async function editSlackMessage(
 ) {
   const client = await getClient(opts, "write");
   const blocks = opts.blocks == null ? undefined : validateSlackBlocksArray(opts.blocks);
+  // CLAW-FORK 2026-06-13 (MED-6): editSlackMessage targets an arbitrary channel
+  // id, so apply the same fail-closed workspace allowlist guard as the send path.
+  await assertSlackChannelTeamAllowed(client, channelId);
   await client.chat.update({
     channel: channelId,
     ts: messageId,

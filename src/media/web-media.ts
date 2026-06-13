@@ -201,7 +201,30 @@ const HTML_SAFETY_DANGER_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> =
   { name: "data-html-uri", re: /\bdata:text\/html\b/i },
   { name: "meta-refresh", re: /<meta[^>]+http-equiv\s*=\s*["']?refresh\b/i },
   { name: "form-tag", re: /<form\b/i },
+  // CLAW-FORK 2026-06-13 (HIGH-1): `<base href>` can re-root relative URLs.
+  { name: "base-href", re: /<base\b[^>]*\bhref\b/i },
 ];
+
+// CLAW-FORK 2026-06-13 (HIGH-1): decode numeric/named HTML entities so that
+// entity-obfuscated `javascript:` URLs (e.g. `&#x6a;avascript&#58;`) are caught
+// by the javascript-url pattern. Only decodes — does not alter the original
+// buffer; used purely for a second danger-pattern pass.
+function decodeHtmlEntitiesForScan(text: string): string {
+  return text.replace(/&(#x?[0-9a-f]+|[a-z]+);?/gi, (whole, body: string) => {
+    const lower = body.toLowerCase();
+    if (lower === "colon") return ":";
+    if (lower === "newline" || lower === "tab") return "";
+    if (lower[0] !== "#") return whole; // leave unknown named entities intact
+    const isHex = lower[1] === "x";
+    const num = Number.parseInt(lower.slice(isHex ? 2 : 1), isHex ? 16 : 10);
+    if (!Number.isFinite(num) || num < 0 || num > 0x10ffff) return whole;
+    try {
+      return String.fromCodePoint(num);
+    } catch {
+      return whole;
+    }
+  });
+}
 
 // CLAW-FORK: outprint-rendered HTML signature. Allows pan/zoom + Chart.js
 // scripts that outprint-render injects, since these come from a trusted
@@ -220,7 +243,49 @@ function isOutprintRenderedHtml(text: string): boolean {
   return OUTPRINT_HTML_SIGNATURE_RE.test(text) && text.includes(OUTPRINT_INTERACTIVE_LAYER_MARKER);
 }
 
-function validateHostReadHtmlSafety(buffer: Buffer): void {
+// CLAW-FORK 2026-06-13 (HIGH-1): the outprint renderer emits its interactive
+// layer (pan/zoom + Chart.js bootstrap) as inline <script> blocks whose body
+// carries the distinctive `Outprint interactive layer` marker comment. We allow
+// ONLY complete <script>…</script> blocks that contain that marker to satisfy
+// the script-tag pattern — by excising exactly those blocks before scanning.
+// Everything else (extra/unmarked scripts, forms, iframes, inline event
+// handlers, javascript: URLs, <base href>, …) is still rejected even for
+// outprint-signed HTML. A prompt-injected file that merely copies the signature
+// tokens but adds its own <script>/<form> no longer bypasses the scan, because
+// the injected script lacks the in-body marker and any non-script construct is
+// untouched by the excision.
+const OUTPRINT_MARKED_SCRIPT_RE = /<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi;
+
+function stripOutprintBootstrapBlock(text: string): { stripped: string; removed: boolean } {
+  if (!isOutprintRenderedHtml(text)) {
+    return { stripped: text, removed: false };
+  }
+  let removed = false;
+  const stripped = text.replace(OUTPRINT_MARKED_SCRIPT_RE, (whole, body: string) => {
+    if (typeof body === "string" && body.includes(OUTPRINT_INTERACTIVE_LAYER_MARKER)) {
+      removed = true;
+      return ""; // excise this one trusted, marker-carrying inline script
+    }
+    return whole; // leave unmarked scripts in place → caught by script-tag scan
+  });
+  return { stripped, removed };
+}
+
+function scanHtmlForDangerPatterns(text: string, contextLabel: string): void {
+  const decoded = decodeHtmlEntitiesForScan(text);
+  for (const { name, re } of HTML_SAFETY_DANGER_PATTERNS) {
+    const match = text.match(re) ?? decoded.match(re);
+    if (match) {
+      throw new LocalMediaAccessError(
+        "path-not-allowed",
+        `HTML media rejected by safety filter (${name}${contextLabel}): ${match[0].slice(0, 80)}`,
+      );
+    }
+  }
+}
+
+// Exported for unit testing (CLAW-FORK HIGH-1).
+export function validateHostReadHtmlSafety(buffer: Buffer): void {
   if (buffer.length === 0) {
     throw new LocalMediaAccessError("path-not-allowed", "HTML media safety filter: empty buffer.");
   }
@@ -231,21 +296,12 @@ function validateHostReadHtmlSafety(buffer: Buffer): void {
     );
   }
   const text = buffer.toString("utf-8");
-  // CLAW-FORK: bypass danger-pattern filter for outprint-rendered HTML.
-  // The renderer is a trusted local pipeline whose scripts (pan/zoom, Chart.js)
-  // are catalog-bounded and don't execute arbitrary agent intent.
-  if (isOutprintRenderedHtml(text)) {
-    return;
-  }
-  for (const { name, re } of HTML_SAFETY_DANGER_PATTERNS) {
-    const match = text.match(re);
-    if (match) {
-      throw new LocalMediaAccessError(
-        "path-not-allowed",
-        `HTML media rejected by safety filter (${name}): ${match[0].slice(0, 80)}`,
-      );
-    }
-  }
+  // CLAW-FORK 2026-06-13 (HIGH-1): NEVER grant a blanket bypass on content
+  // signature. For outprint-signed HTML we excise ONLY the single known inline
+  // bootstrap block, then run the full danger-pattern scan on everything that
+  // remains. Non-outprint HTML is scanned as-is.
+  const { stripped } = stripOutprintBootstrapBlock(text);
+  scanHtmlForDangerPatterns(stripped, stripped === text ? "" : "; outprint");
 }
 
 function stripLegacyMediaDirectivePrefix(mediaUrl: string): string {

@@ -27,12 +27,17 @@ export function readSlackReplyBlocks(payload: ReplyPayload) {
   return resolveSlackReplyBlocks(payload);
 }
 
-// CLAW-FORK (Phase 6, multi-agent): best-effort extract agentId from a payload.
-// ReplyPayload doesn't carry agentId directly, but the dispatcher's sessionKey
-// (`agent:<id>:...`) is sometimes attached as `payload.sessionKey` or
-// `payload.metadata.sessionKey`. We just return the agentId or undefined —
-// reviewer is fine with undefined.
+// CLAW-FORK 2026-06-13 (HIGH-4): resolve the producing agentId from the reply
+// payload's WeakMap metadata, where dispatch-from-config.ts now stamps it
+// (alongside toolCallNames). The old implementation read `payload.sessionKey` /
+// `payload.metadata.sessionKey`, which are NEVER set on Slack reply payloads —
+// so agentId was always undefined, the per-agent `responseReviewer` policy was
+// always undefined, and the reviewer ran for every agent. We keep a fallback to
+// the legacy sessionKey fields for safety, but the metadata stamp is the path
+// that actually fires.
 function extractAgentIdFromPayload(payload: ReplyPayload): string | undefined {
+  const stamped = getReplyPayloadMetadata(payload)?.agentId;
+  if (typeof stamped === "string" && stamped) return stamped;
   const sessionKey =
     (payload as { sessionKey?: unknown }).sessionKey ??
     (payload as { metadata?: { sessionKey?: unknown } }).metadata?.sessionKey;
@@ -95,17 +100,17 @@ export async function deliverReplies(params: {
         // Tool call names are stamped on the payload's metadata (WeakMap-backed)
         // by dispatch-from-config.ts.
         const toolCallNames = getReplyPayloadMetadata(payload)?.toolCallNames;
-        // Skip reviewer for direct-to-user agents where the user reviews
-        // outputs themselves (e.g. self-improve via branch diff, data-analyst
-        // bots against external dashboards). Read from per-agent
-        // `agents.list[].responseReviewer: "off"` config.
+        // CLAW-FORK 2026-06-13 (HIGH-4): reviewer is OPT-IN. It runs ONLY when the
+        // producing agent has `agents.list[].responseReviewer === "on"`. Any other
+        // value (absent / "off" / unknown) means NO reviewer call — so the default
+        // (no key set) is no Moonshot call, instead of running for every agent.
         const reviewerAgentId = extractAgentIdFromPayload(payload);
         const reviewerPolicy = reviewerAgentId
           ? params.cfg.agents?.list?.find((entry) => entry.id === reviewerAgentId)?.responseReviewer
           : undefined;
-        if (reviewerAgentId && reviewerPolicy === "off") {
+        if (reviewerPolicy !== "on") {
           params.runtime.log?.(
-            `[claw-debug] reviewer: skipped for ${reviewerAgentId} (agents.list[].responseReviewer=off)`,
+            `[claw-debug] reviewer: skipped for ${reviewerAgentId ?? "unknown"} (responseReviewer!=on)`,
           );
         } else
           try {

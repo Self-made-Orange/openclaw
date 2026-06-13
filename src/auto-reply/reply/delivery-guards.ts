@@ -94,9 +94,16 @@ export function detectHallucinatedFiles(params: {
       if (!candidate || seen.has(candidate)) continue;
       seen.add(candidate);
       // Skip if already covered by an explicit MEDIA directive (existing url).
-      const alreadyAttached = Array.from(existing).some((u) =>
-        u.endsWith(candidate.replace(/^\.\.\//, "")),
-      );
+      // CLAW-FORK 2026-06-13 (LOW): require a path-boundary before the suffix so
+      // a bare `u.endsWith(candidate)` can't over-skip — e.g. existing
+      // `foo/evil-report.html` must NOT be treated as already covering candidate
+      // `report.html`. Match only when the suffix equals the full url or is
+      // preceded by a `/` separator.
+      const needle = candidate.replace(/^\.\.\//, "");
+      const alreadyAttached = Array.from(existing).some((u) => {
+        if (u === needle) return true;
+        return u.endsWith(`/${needle}`);
+      });
       if (alreadyAttached) continue;
       const resolved = resolveOutputCandidate(candidate);
       if (resolved) {

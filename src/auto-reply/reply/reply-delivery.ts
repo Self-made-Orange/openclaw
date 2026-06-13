@@ -13,6 +13,7 @@ import {
   mergeSlackBlocksIntoChannelData,
   readSlackBlocksFromChannelData,
 } from "./delivery-guards.js";
+import { getInteractiveFenceRe, getJsonInteractiveFenceRe } from "./interactive-fence-regex.js";
 import { parseReplyDirectives } from "./reply-directives.js";
 import { applyReplyTagsToPayload, isRenderablePayload } from "./reply-payloads.js";
 import type { TypingSignaler } from "./typing-mode.js";
@@ -29,14 +30,11 @@ export type ReplyDirectiveParseMode = "always" | "auto" | "never";
 // Body forms accepted:
 //   { "blocks": [...] }
 //   { "attachments": [{ "blocks": [...], ... }] }
-const INTERACTIVE_FENCE_RE = /```openclaw-(?:interactive|blocks)\s*\n([\s\S]*?)\n```\s*/gi;
-
-// CLAW-FORK fallback: Kimi sometimes emits the dispatch *output* schema inside a
-// `json` (or untyped) fence instead of the expected `openclaw-interactive`
-// fence. We rescue these by detecting the `"type":"openclaw-interactive"`
-// signature in any fenced JSON block.
-const JSON_INTERACTIVE_FENCE_RE =
-  /```(?:json|jsonc|javascript|js)?\s*\n(\{[\s\S]*?"type"\s*:\s*"openclaw-interactive"[\s\S]*?\})\s*\n```\s*/gi;
+//
+// CLAW-FORK 2026-06-13 (MED-5): regexes now come from the shared
+// interactive-fence-regex module so the slack cron path
+// (extensions/slack/src/extract-claw-fence.ts) and this reply path can no longer
+// diverge on closing-fence handling.
 
 const ABSTRACT_BLOCK_TYPES = new Set(["text", "buttons", "select"]);
 
@@ -219,12 +217,12 @@ function extractClawInteractive(text: string): {
       logVerbose(`[claw-debug] fence: invalid JSON (${(err as Error).message})`);
     }
   };
-  stripped = stripped.replace(INTERACTIVE_FENCE_RE, (_match, body: string) => {
+  stripped = stripped.replace(getInteractiveFenceRe(), (_match, body: string) => {
     handleBody(body);
     return "";
   });
   if (hasJsonFallback) {
-    stripped = stripped.replace(JSON_INTERACTIVE_FENCE_RE, (_match, body: string) => {
+    stripped = stripped.replace(getJsonInteractiveFenceRe(), (_match, body: string) => {
       handleBody(body);
       logVerbose(`[claw-debug] fence: rescued json-fenced openclaw-interactive payload`);
       return "";

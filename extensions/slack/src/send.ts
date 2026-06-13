@@ -74,7 +74,14 @@ function getSlackAllowedTeamIds(): string[] {
   return SLACK_ALLOWED_TEAM_IDS_DEFAULT;
 }
 
-async function assertSlackChannelTeamAllowed(client: WebClient, channelId: string): Promise<void> {
+// CLAW-FORK 2026-06-13 (MED-6): exported so direct chat.update / postEphemeral /
+// postMessage sites that target an arbitrary channel id can apply the same
+// fail-closed workspace allowlist guard (previously only the queued send path
+// was guarded, leaving update/ephemeral sites able to leak cross-workspace).
+export async function assertSlackChannelTeamAllowed(
+  client: WebClient,
+  channelId: string,
+): Promise<void> {
   const allowed = getSlackAllowedTeamIds();
   let teamId = slackChannelTeamCache.get(channelId);
   if (!teamId) {
@@ -719,7 +726,14 @@ export async function sendMessageSlack(
   // extraction here makes the fence work for every path (cron, reply, etc).
   let message = initialMessage;
   let opts: SlackSendOpts = initialOpts;
-  if (message && !opts.blocks) {
+  // CLAW-FORK 2026-06-13 (HIGH-2): do NOT lift the fence into blocks when a
+  // mediaUrl is present. Slack cannot post blocks alongside media in one call,
+  // and sendMessageSlackQueuedInner throws hard ("blocks with mediaUrl") — which
+  // regressed media sends that happened to carry an interactive fence. The
+  // reply-delivery path already merges fence→channelData upstream of media
+  // decisions, so here we simply leave the fence inline as text and let the
+  // media go out. (The cron/non-media path is unchanged.)
+  if (message && !opts.blocks && !opts.mediaUrl) {
     const fence = extractClawInteractiveFence(message);
     if (fence.rawBlocks.length > 0) {
       message = fence.text || "";

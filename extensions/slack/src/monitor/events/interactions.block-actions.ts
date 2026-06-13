@@ -24,6 +24,7 @@ import {
   SLACK_REPLY_BUTTON_ACTION_ID,
   SLACK_REPLY_SELECT_ACTION_ID,
 } from "../../reply-action-ids.js";
+import { assertSlackChannelTeamAllowed } from "../../send.js";
 import {
   authorizeSlackSystemEventSender,
   resolveSlackCommandIngress,
@@ -466,6 +467,10 @@ async function updateSlackInteractionMessage(params: {
   if (!params.channelId || !params.messageTs) {
     return;
   }
+  // CLAW-FORK 2026-06-13 (MED-6): channelId originates from the parsed action
+  // payload (attacker-influenceable), so apply the fail-closed workspace
+  // allowlist guard before updating the target message.
+  await assertSlackChannelTeamAllowed(params.ctx.app.client, params.channelId);
   await params.ctx.app.client.chat.update({
     channel: params.channelId,
     ts: params.messageTs,

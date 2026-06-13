@@ -334,6 +334,10 @@
       "types": "./dist/plugin-sdk/reply-chunking.d.ts",
       "default": "./dist/plugin-sdk/reply-chunking.js"
     },
+    "./plugin-sdk/interactive-fence": {
+      "types": "./dist/plugin-sdk/interactive-fence.d.ts",
+      "default": "./dist/plugin-sdk/interactive-fence.js"
+    },
     "./plugin-sdk/reply-payload": {
       "types": "./dist/plugin-sdk/reply-payload.d.ts",
       "default": "./dist/plugin-sdk/reply-payload.js"
