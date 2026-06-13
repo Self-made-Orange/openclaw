@@ -377,6 +377,18 @@ export type AssembledChannelTurn = {
   storePath: string;
   ctxPayload: FinalizedMsgContext;
   recordInboundSession: RecordInboundSession;
+  /**
+   * CLAW-FORK (multi-agent intent routing): when the inbound route carries the
+   * `__intent_pending__` sentinel agentId, the real agent is only resolved
+   * inside dispatch (the sentinel→real rewrite in dispatch-from-config). The
+   * pre-dispatch session record would otherwise write a ghost
+   * `agents/__intent_pending__/` store. When this resolver is present and the
+   * route session key is a sentinel, the kernel defers the inbound session
+   * record until AFTER dispatch and re-targets it using the resolved
+   * storePath/sessionKey returned here. Returns undefined if no deferral is
+   * needed (non-sentinel) or the real agent could not be resolved.
+   */
+  resolveDeferredRecordTarget?: () => { storePath: string; sessionKey: string } | undefined;
   dispatchReplyWithBufferedBlockDispatcher: DispatchReplyWithBufferedBlockDispatcher;
   delivery: ChannelEventDeliveryAdapter;
   replyPipeline?: ChannelTurnReplyPipelineOptions;
@@ -400,6 +412,13 @@ export type PreparedChannelTurn<TDispatchResult = DispatchFromConfigResult> = {
   storePath: string;
   ctxPayload: FinalizedMsgContext;
   recordInboundSession: RecordInboundSession;
+  /**
+   * CLAW-FORK (multi-agent intent routing): see {@link AssembledChannelTurn.resolveDeferredRecordTarget}.
+   * When present and the route session key is the `__intent_pending__` sentinel,
+   * the inbound session record is deferred until after dispatch resolves the
+   * real agent, then re-targeted with the values this resolver returns.
+   */
+  resolveDeferredRecordTarget?: () => { storePath: string; sessionKey: string } | undefined;
   record?: ChannelTurnRecordOptions;
   history?: ChannelTurnHistoryFinalizeOptions;
   onPreDispatchFailure?: (err: unknown) => void | Promise<void>;
