@@ -192,6 +192,9 @@ function extractClawInteractive(text: string): {
   let stripped = text;
   let abstractBlocks: ClawInteractiveBlock[] = [];
   let rawBlocks: unknown[] = [];
+  // CLAW-FORK: track fence JSON parse failures so a malformed fence never
+  // produces a silently-empty reply (see fallback below).
+  let parseFailed = false;
   const handleBody = (body: string): void => {
     try {
       const parsed = JSON.parse(body) as unknown;
@@ -214,6 +217,7 @@ function extractClawInteractive(text: string): {
         logVerbose(`[claw-debug] fence: raw Slack blocks=${blocks.length} types=${types}`);
       }
     } catch (err) {
+      parseFailed = true;
       logVerbose(`[claw-debug] fence: invalid JSON (${(err as Error).message})`);
     }
   };
@@ -229,6 +233,12 @@ function extractClawInteractive(text: string): {
     });
   }
   stripped = stripped.replace(/\n{3,}/g, "\n\n").trim();
+  // CLAW-FORK: if the ONLY content was a malformed fence (parse failed, no blocks
+  // extracted, and no surrounding text survived), don't deliver silence. Emit a
+  // clean notice instead of dropping the message or leaking raw fence JSON.
+  if (!stripped && abstractBlocks.length === 0 && rawBlocks.length === 0 && parseFailed) {
+    stripped = "응답 형식 오류로 내용을 표시하지 못했어요. (관리자 로그 확인 필요)";
+  }
   return {
     text: stripped,
     ...(abstractBlocks.length > 0 ? { interactive: { blocks: abstractBlocks } } : {}),
