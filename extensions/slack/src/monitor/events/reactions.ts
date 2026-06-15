@@ -2,6 +2,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { SlackEventMiddlewareArgs } from "@slack/bolt";
+import type { WebClient as SlackWebClient } from "@slack/web-api";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { danger } from "openclaw/plugin-sdk/runtime-env";
 import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
@@ -27,12 +28,71 @@ const POSITIVE_EMOJI = new Set([
   "heart",
 ]);
 
+// CLAW-FORK: block sequence + char counts derivation for §positive entries.
+// Slack Block Kit block 을 SKILL.md §positive 가 기대하는 짧은 label 로 압축.
+// 알 수 없는 type 은 그대로 통과 (downstream 클러스터링이 처리).
+function summarizeBlockSig(block: { type?: string; fields?: unknown[] }): string {
+  const type = block.type ?? "unknown";
+  if (type === "section" && Array.isArray(block.fields) && block.fields.length > 0) {
+    return `section.fields(${block.fields.length})`;
+  }
+  return type;
+}
+
+// header/section/context 만 의미 있는 text 추출. rich_text 등 복잡 block 은
+// JSON length 로 근사. 정확한 char count 가 아니라 형태 신호 용도.
+function extractBlockText(block: {
+  type?: string;
+  text?: { text?: string };
+  fields?: Array<{ text?: string }>;
+  elements?: Array<{ type?: string; text?: string }>;
+}): string {
+  const parts: string[] = [];
+  if (block.text?.text) parts.push(block.text.text);
+  if (Array.isArray(block.fields)) {
+    for (const f of block.fields) {
+      if (f?.text) parts.push(f.text);
+    }
+  }
+  if (Array.isArray(block.elements)) {
+    for (const e of block.elements) {
+      if ((e?.type === "mrkdwn" || e?.type === "plain_text") && e.text) parts.push(e.text);
+    }
+  }
+  return parts.join("");
+}
+
+type SlackMessageBlocksLike = {
+  text?: string;
+  blocks?: Array<Record<string, unknown>>;
+};
+
+async function fetchBotMessageBlocks(params: {
+  client: SlackWebClient;
+  channelId: string;
+  msgTs: string;
+}): Promise<SlackMessageBlocksLike | undefined> {
+  try {
+    const response = (await params.client.conversations.history({
+      channel: params.channelId,
+      latest: params.msgTs,
+      oldest: params.msgTs,
+      inclusive: true,
+      limit: 1,
+    })) as { messages?: SlackMessageBlocksLike[] };
+    return response.messages?.[0];
+  } catch {
+    return undefined;
+  }
+}
+
 async function fastLogPositiveReaction(params: {
   channelLabel: string;
   channelId?: string;
   msgTs?: string;
   reactor: string;
   authorLabel?: string;
+  client?: SlackWebClient;
 }): Promise<void> {
   const home = process.env.HOME;
   if (!home) return;
@@ -51,7 +111,32 @@ async function fastLogPositiveReaction(params: {
   const hh = String(now.getHours()).padStart(2, "0");
   const min = String(now.getMinutes()).padStart(2, "0");
   const stamp = `${yyyy}-${mm}-${dd} ${hh}:${min}`;
-  const entry = `\n## ${stamp} | quick-log | reactor: ${params.reactor}\n- channel: \`${params.channelId ?? params.channelLabel}\`\n- msg ts: \`${params.msgTs ?? ""}\`\n- author: \`${params.authorLabel ?? ""}\`\n- block analysis: pending (synth)\n`;
+
+  // 봇 메시지 재조회 → block sequence + char counts. 실패하면 약식 fallback.
+  // LLM 호출 없음 — 0 추가 토큰. slack API 1회만 추가.
+  let blockSequenceLine = "";
+  let charCountsLine = "";
+  if (params.client && params.channelId && params.msgTs) {
+    const message = await fetchBotMessageBlocks({
+      client: params.client,
+      channelId: params.channelId,
+      msgTs: params.msgTs,
+    });
+    if (message) {
+      const blocks = Array.isArray(message.blocks) ? message.blocks : [];
+      if (blocks.length > 0) {
+        const sequence = blocks.map((b) => summarizeBlockSig(b)).join(" → ");
+        blockSequenceLine = `- block sequence: \`${sequence}\`\n`;
+      }
+      const textLen = (message.text ?? "").length;
+      const blocksTextLen = blocks.reduce((acc, b) => acc + extractBlockText(b).length, 0);
+      if (textLen > 0 || blocksTextLen > 0) {
+        charCountsLine = `- char counts: text=${textLen}, blocks_text=${blocksTextLen}\n`;
+      }
+    }
+  }
+
+  const entry = `\n## ${stamp} | quick-log | reactor: ${params.reactor}\n- channel: \`${params.channelId ?? params.channelLabel}\`\n- msg ts: \`${params.msgTs ?? ""}\`\n- author: \`${params.authorLabel ?? ""}\`\n${blockSequenceLine}${charCountsLine}- block analysis: pending (synth)\n`;
   await fs.appendFile(positivePath, entry, "utf-8");
 }
 
@@ -135,6 +220,7 @@ export function registerSlackReactionEvents(params: {
               msgTs: item.ts,
               reactor: actorInfo?.name ?? event.user ?? "unknown",
               authorLabel: authorInfo?.name ?? event.item_user,
+              client: ctx.app.client,
             });
             ctx.runtime.log?.(
               `[claw-debug] reaction :+1: silent-logged (no wake): channel=${item.channel} msg=${item.ts}`,
