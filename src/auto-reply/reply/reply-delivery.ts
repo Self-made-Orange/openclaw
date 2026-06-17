@@ -246,6 +246,25 @@ function extractClawInteractive(text: string): {
   };
 }
 
+// CLAW-FORK: "stranded Block Kit" guard.
+// 봇이 Block Kit JSON 을 ```json ... ``` 같은 평문 코드블록 안에 넣고 끝내면
+// Slack 은 그걸 코드 텍스트로만 보여줘 — 사용자한테는 "렌더 안 됨" 사고.
+// 어제(2026-06-17) main 채널에서 정확히 이 패턴 발생 + 봇이 "보냈습니다" 로
+// 거짓 보고함. 여기서 패턴을 감지해 응답 끝에 한 줄 안내를 자동 추가한다.
+// 자동 송출 변환은 의도 모호(코드 예시 vs 송출 의도) 라 하지 않는다.
+const BLOCK_KIT_KEY_RE =
+  /"blocks"\s*:\s*\[|"type"\s*:\s*"(header|section|table|divider|actions|context)"/;
+const FENCED_CODE_RE = /```(?:json)?\s*\n([\s\S]*?)\n```/g;
+function detectStrandedBlockKit(text: string): boolean {
+  if (!text || !text.includes("```")) return false;
+  FENCED_CODE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = FENCED_CODE_RE.exec(text)) !== null) {
+    if (BLOCK_KIT_KEY_RE.test(m[1])) return true;
+  }
+  return false;
+}
+
 /** Parses inline reply directives into payload fields and silent-reply state. */
 export function normalizeReplyPayloadDirectives(params: {
   payload: ReplyPayload;
@@ -297,6 +316,15 @@ export function normalizeReplyPayloadDirectives(params: {
     }
     if (extracted.rawSlackBlocks && extracted.rawSlackBlocks.length > 0) {
       injectedRawSlackBlocks = extracted.rawSlackBlocks;
+    }
+    // CLAW-FORK: 가드 — Block Kit JSON 이 ```json 코드블록에 stranded 됐고
+    // 그게 실제 Block Kit 으로 변환된 블록(interactive/rawSlackBlocks) 도 없으면
+    // 사용자한테 "코드블록일 뿐 렌더 안 됨" 한 줄 안내를 자동 추가.
+    if (text && !interactive && !injectedRawSlackBlocks && detectStrandedBlockKit(text)) {
+      text =
+        text +
+        "\n\n_⚠️ Block Kit JSON 이 코드블록 안에 평문으로 표시됐어요 — Slack 이 렌더하지 않습니다. 실제로 송출하려면 `mcp__openclaw__message` 의 `blocks` 파라미터로 보내야 해요._";
+      logVerbose(`[claw-debug] stranded-block-kit guard fired (length=${text.length})`);
     }
   }
 
