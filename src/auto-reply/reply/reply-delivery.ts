@@ -255,13 +255,26 @@ function extractClawInteractive(text: string): {
 const BLOCK_KIT_KEY_RE =
   /"blocks"\s*:\s*\[|"type"\s*:\s*"(header|section|table|divider|actions|context)"/;
 const FENCED_CODE_RE = /```(?:json)?\s*\n([\s\S]*?)\n```/g;
+// CLAW-FORK: 잘못된 fence 형식 두 가지를 같이 잡는다.
+//   1) ```json … "blocks":… ``` 같은 평문 코드블록 (어제 main 사고)
+//   2) <openclaw-interactive> … </openclaw-interactive> 꺾쇠 태그 형식 — 정상
+//      regex(getInteractiveFenceRe) 가 백틱+라벨만 인정하므로 LLM 이 이 변형으로
+//      쓰면 매칭 0 → fence 처리 안 됨 → raw text 그대로 송출 사고 (오늘 main).
+//   3) 라벨만 평문으로 노출된 변형 (`openclaw-interactive` 자체가 본문에 남음).
+const STRANDED_INTERACTIVE_TOKEN_RE =
+  /<\/?openclaw-(?:interactive|blocks)\s*>|(?<![\w`-])openclaw-(?:interactive|blocks)(?![\w-])/i;
 function detectStrandedBlockKit(text: string): boolean {
-  if (!text || !text.includes("```")) return false;
-  FENCED_CODE_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = FENCED_CODE_RE.exec(text)) !== null) {
-    if (BLOCK_KIT_KEY_RE.test(m[1])) return true;
+  if (!text) return false;
+  // (1) ```json + Block Kit 키
+  if (text.includes("```")) {
+    FENCED_CODE_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = FENCED_CODE_RE.exec(text)) !== null) {
+      if (BLOCK_KIT_KEY_RE.test(m[1])) return true;
+    }
   }
+  // (2)(3) <openclaw-interactive> 꺾쇠/노출 라벨 변형
+  if (STRANDED_INTERACTIVE_TOKEN_RE.test(text)) return true;
   return false;
 }
 
@@ -323,7 +336,7 @@ export function normalizeReplyPayloadDirectives(params: {
     if (text && !interactive && !injectedRawSlackBlocks && detectStrandedBlockKit(text)) {
       text =
         text +
-        "\n\n_⚠️ Block Kit JSON 이 코드블록 안에 평문으로 표시됐어요 — Slack 이 렌더하지 않습니다. 실제로 송출하려면 `mcp__openclaw__message` 의 `blocks` 파라미터로 보내야 해요._";
+        '\n\n_⚠️ Block Kit 페이로드가 평문으로 노출됐어요 — Slack 이 렌더하지 않습니다. fence 는 정확히 ` ```openclaw-interactive\\n{...}\\n``` ` 형식이어야 하고, 안의 JSON 은 `{"blocks":[...]}` 배열이어야 해요. 직접 송출은 `mcp__openclaw__message` 의 `blocks` 파라미터로._';
       logVerbose(`[claw-debug] stranded-block-kit guard fired (length=${text.length})`);
     }
   }
