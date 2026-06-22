@@ -14,6 +14,7 @@ import {
   readSlackBlocksFromChannelData,
 } from "./delivery-guards.js";
 import {
+  getAngleInteractiveRe,
   getInteractiveFenceRe,
   getJsonBlockKitFenceRe,
   getJsonInteractiveFenceRe,
@@ -134,6 +135,31 @@ function looksLikeSlackBlocks(blocks: unknown[]): boolean {
   );
 }
 
+// CLAW-FORK 2026-06-22: angle-bracket fence body 파서. 본문이 깨끗한 JSON 이
+// 아닐 수 있어(앞뒤 텍스트·trailing) 관대하게: trim 후 parse, 실패 시 첫 `{`/`[`
+// ~ 마지막 `}`/`]` 슬라이스 재시도. blocks 추출 후 반환(검증은 호출측).
+function parseLenientBlockKitBody(body: string): unknown[] {
+  const tryParse = (s: string): unknown[] => {
+    try {
+      return extractFenceBlocksFromBody(JSON.parse(s) as unknown);
+    } catch {
+      return [];
+    }
+  };
+  const trimmed = (body || "").trim();
+  let blocks = tryParse(trimmed);
+  if (blocks.length === 0) {
+    const startObj = trimmed.indexOf("{");
+    const startArr = trimmed.indexOf("[");
+    const start = startArr !== -1 && (startObj === -1 || startArr < startObj) ? startArr : startObj;
+    const end = Math.max(trimmed.lastIndexOf("}"), trimmed.lastIndexOf("]"));
+    if (start !== -1 && end > start) {
+      blocks = tryParse(trimmed.slice(start, end + 1));
+    }
+  }
+  return blocks;
+}
+
 function extractFenceBlocksFromBody(body: unknown): unknown[] {
   // CLAW-FORK: bare 배열 body (`[ {type:...}, ... ]`) 직접 허용.
   if (Array.isArray(body)) return body;
@@ -227,7 +253,9 @@ function extractClawInteractive(text: string): {
     /"blocks"\s*:|"type"\s*:\s*"(section|header|divider|context|actions|table|rich_text|image)"/.test(
       text,
     );
-  if (!hasOpenclawFence && !hasJsonFallback && !hasBlockKitFallback) {
+  // CLAW-FORK 2026-06-22: angle-bracket fence variant `<openclaw-interactive>…`.
+  const hasAngleInteractive = /<openclaw-(?:interactive|blocks)>/i.test(text);
+  if (!hasOpenclawFence && !hasJsonFallback && !hasBlockKitFallback && !hasAngleInteractive) {
     return { text };
   }
   let stripped = text;
@@ -291,6 +319,16 @@ function extractClawInteractive(text: string): {
       } catch {
         return match;
       }
+    });
+  }
+  // CLAW-FORK 2026-06-22: angle-bracket fence `<openclaw-interactive>{json}</…>`.
+  if (hasAngleInteractive) {
+    stripped = stripped.replace(getAngleInteractiveRe(), (match, body: string) => {
+      const blocks = parseLenientBlockKitBody(body);
+      if (!looksLikeSlackBlocks(blocks)) return match;
+      rawBlocks = rawBlocks.concat(blocks);
+      logVerbose(`[claw-debug] fence: rescued angle-bracket Block Kit (blocks=${blocks.length})`);
+      return "";
     });
   }
   stripped = stripped.replace(/\n{3,}/g, "\n\n").trim();

@@ -24,10 +24,38 @@
 // (`([\s\S]*?)```` with no required newline, no `openclaw-blocks` alias,
 // case-sensitive); we now share the stricter `\n```` form.
 import {
+  getAngleInteractiveRe,
   getInteractiveFenceRe,
   getJsonBlockKitFenceRe,
   getJsonInteractiveFenceRe,
 } from "openclaw/plugin-sdk/interactive-fence";
+
+// CLAW-FORK 2026-06-22: angle-bracket fence body 파서 (관대).
+function parseLenientBlockKitBody(body: string): unknown[] {
+  const grab = (parsed: unknown): unknown[] =>
+    Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as { blocks?: unknown })?.blocks)
+        ? (parsed as { blocks: unknown[] }).blocks
+        : [];
+  const trimmed = (body || "").trim();
+  try {
+    return grab(JSON.parse(trimmed));
+  } catch {
+    const so = trimmed.indexOf("{");
+    const sa = trimmed.indexOf("[");
+    const start = sa !== -1 && (so === -1 || sa < so) ? sa : so;
+    const end = Math.max(trimmed.lastIndexOf("}"), trimmed.lastIndexOf("]"));
+    if (start !== -1 && end > start) {
+      try {
+        return grab(JSON.parse(trimmed.slice(start, end + 1)));
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+}
 
 // CLAW-FORK 2026-06-21: 알려진 Slack block type — lenient rescue 검증용.
 const KNOWN_SLACK_BLOCK_TYPES = new Set([
@@ -72,7 +100,8 @@ export function extractClawInteractiveFence(text: string): FenceExtractionResult
     /"blocks"\s*:|"type"\s*:\s*"(section|header|divider|context|actions|table|rich_text|image)"/.test(
       text,
     );
-  if (!hasOpenclawFence && !hasJsonFallback && !hasBlockKitFallback) {
+  const hasAngleInteractive = /<openclaw-(?:interactive|blocks)>/i.test(text);
+  if (!hasOpenclawFence && !hasJsonFallback && !hasBlockKitFallback && !hasAngleInteractive) {
     return { text, rawBlocks: [] };
   }
 
@@ -135,6 +164,16 @@ export function extractClawInteractiveFence(text: string): FenceExtractionResult
       } catch {
         return match;
       }
+    });
+  }
+
+  // CLAW-FORK 2026-06-22: angle-bracket fence `<openclaw-interactive>{json}</…>`.
+  if (hasAngleInteractive) {
+    stripped = stripped.replace(getAngleInteractiveRe(), (match, body: string) => {
+      const blocks = parseLenientBlockKitBody(body);
+      if (!looksLikeSlackBlocks(blocks)) return match;
+      rawBlocks = rawBlocks.concat(blocks);
+      return "";
     });
   }
 

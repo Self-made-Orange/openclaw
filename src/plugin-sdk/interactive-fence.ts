@@ -4,6 +4,7 @@
  * (core) fence parsers on one canonical pattern.
  */
 export {
+  getAngleInteractiveRe,
   getInteractiveFenceRe,
   getJsonBlockKitFenceRe,
   getJsonInteractiveFenceRe,

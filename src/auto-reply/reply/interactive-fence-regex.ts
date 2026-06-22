@@ -46,3 +46,15 @@ export function getJsonInteractiveFenceRe(): RegExp {
 export function getJsonBlockKitFenceRe(): RegExp {
   return /```(?:json|jsonc|javascript|js)?\s*\n(\{\s*"blocks"\s*:\s*\[[\s\S]*?\]\s*\}|\[\s*\{[\s\S]*?\}\s*\])\s*\n```\s*/gi;
 }
+
+/**
+ * CLAW-FORK 2026-06-22: angle-bracket variant. Agents repeatedly emit the
+ * fence as an XML-ish tag `<openclaw-interactive> {json} </openclaw-interactive>`
+ * (no backticks) instead of the backtick fence. Capture the body between the
+ * open tag and either the matching close tag or end-of-text (some emit no
+ * close tag). Body is typically `{"blocks":[...]}`. Validation happens in the
+ * parser. `openclaw-blocks` alias also accepted.
+ */
+export function getAngleInteractiveRe(): RegExp {
+  return /<openclaw-(?:interactive|blocks)>\s*([\s\S]*?)\s*(?:<\/openclaw-(?:interactive|blocks)>|$)/gi;
+}
