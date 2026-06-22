@@ -25,8 +25,35 @@
 // case-sensitive); we now share the stricter `\n```` form.
 import {
   getInteractiveFenceRe,
+  getJsonBlockKitFenceRe,
   getJsonInteractiveFenceRe,
 } from "openclaw/plugin-sdk/interactive-fence";
+
+// CLAW-FORK 2026-06-21: 알려진 Slack block type — lenient rescue 검증용.
+const KNOWN_SLACK_BLOCK_TYPES = new Set([
+  "section",
+  "header",
+  "divider",
+  "context",
+  "actions",
+  "image",
+  "input",
+  "table",
+  "rich_text",
+  "video",
+  "file",
+  "call",
+]);
+function looksLikeSlackBlocks(blocks: unknown[]): boolean {
+  if (!Array.isArray(blocks) || blocks.length === 0) return false;
+  return blocks.every(
+    (b) =>
+      b !== null &&
+      typeof b === "object" &&
+      typeof (b as { type?: unknown }).type === "string" &&
+      KNOWN_SLACK_BLOCK_TYPES.has((b as { type: string }).type),
+  );
+}
 
 export interface FenceExtractionResult {
   text: string;
@@ -39,7 +66,13 @@ export function extractClawInteractiveFence(text: string): FenceExtractionResult
   }
   const hasOpenclawFence = text.includes("```openclaw-");
   const hasJsonFallback = /"type"\s*:\s*"openclaw-interactive"/i.test(text);
-  if (!hasOpenclawFence && !hasJsonFallback) {
+  // CLAW-FORK 2026-06-21: lenient — ```json fence with a Slack blocks shape.
+  const hasBlockKitFallback =
+    text.includes("```") &&
+    /"blocks"\s*:|"type"\s*:\s*"(section|header|divider|context|actions|table|rich_text|image)"/.test(
+      text,
+    );
+  if (!hasOpenclawFence && !hasJsonFallback && !hasBlockKitFallback) {
     return { text, rawBlocks: [] };
   }
 
@@ -81,6 +114,27 @@ export function extractClawInteractiveFence(text: string): FenceExtractionResult
         // ignore
       }
       return match;
+    });
+  }
+
+  // CLAW-FORK 2026-06-21: lenient Block Kit rescue (cron announce path).
+  // ```json {"blocks":[...]} 또는 bare [block,...] 을 검증 후 변환. 코드 예시
+  // (blocks 아님) 는 looksLikeSlackBlocks 실패로 그대로 둔다.
+  if (hasBlockKitFallback) {
+    stripped = stripped.replace(getJsonBlockKitFenceRe(), (match, body: string) => {
+      try {
+        const parsed = JSON.parse(body) as unknown;
+        const blocks = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray((parsed as { blocks?: unknown })?.blocks)
+            ? (parsed as { blocks: unknown[] }).blocks
+            : [];
+        if (!looksLikeSlackBlocks(blocks)) return match;
+        rawBlocks = rawBlocks.concat(blocks);
+        return "";
+      } catch {
+        return match;
+      }
     });
   }
 

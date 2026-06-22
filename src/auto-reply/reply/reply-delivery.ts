@@ -13,7 +13,11 @@ import {
   mergeSlackBlocksIntoChannelData,
   readSlackBlocksFromChannelData,
 } from "./delivery-guards.js";
-import { getInteractiveFenceRe, getJsonInteractiveFenceRe } from "./interactive-fence-regex.js";
+import {
+  getInteractiveFenceRe,
+  getJsonBlockKitFenceRe,
+  getJsonInteractiveFenceRe,
+} from "./interactive-fence-regex.js";
 import { parseReplyDirectives } from "./reply-directives.js";
 import { applyReplyTagsToPayload, isRenderablePayload } from "./reply-payloads.js";
 import type { TypingSignaler } from "./typing-mode.js";
@@ -103,7 +107,36 @@ function isClawInteractiveBlock(value: unknown): value is ClawInteractiveBlock {
   return false;
 }
 
+// CLAW-FORK: 알려진 Slack Block Kit block type 집합. lenient rescue 가
+// "이 JSON 이 진짜 blocks 인지" 검증할 때 사용 (코드 예시 오탐 방지).
+const KNOWN_SLACK_BLOCK_TYPES = new Set([
+  "section",
+  "header",
+  "divider",
+  "context",
+  "actions",
+  "image",
+  "input",
+  "table",
+  "rich_text",
+  "video",
+  "file",
+  "call",
+]);
+function looksLikeSlackBlocks(blocks: unknown[]): boolean {
+  if (!Array.isArray(blocks) || blocks.length === 0) return false;
+  return blocks.every(
+    (b) =>
+      Boolean(b) &&
+      typeof b === "object" &&
+      typeof (b as { type?: unknown }).type === "string" &&
+      KNOWN_SLACK_BLOCK_TYPES.has((b as { type: string }).type),
+  );
+}
+
 function extractFenceBlocksFromBody(body: unknown): unknown[] {
+  // CLAW-FORK: bare 배열 body (`[ {type:...}, ... ]`) 직접 허용.
+  if (Array.isArray(body)) return body;
   if (!body || typeof body !== "object") return [];
   // CLAW-FORK: unwrap the dispatch output schema. Kimi sometimes emits
   // `{type:"openclaw-interactive", payload:{interactive,channelData:{slack:{blocks:[...]}}}}`
@@ -186,7 +219,15 @@ function extractClawInteractive(text: string): {
   // CLAW-FORK fallback: also rescue ```json fences that contain the dispatch
   // output schema (`"type":"openclaw-interactive"`).
   const hasJsonFallback = /"type"\s*:\s*"openclaw-interactive"/i.test(text);
-  if (!hasOpenclawFence && !hasJsonFallback) {
+  // CLAW-FORK 2026-06-21: lenient rescue — ```json fence with a Slack blocks
+  // shape ({"blocks":[...]} or bare [...]). Only worth attempting if a code
+  // fence is present and it mentions "blocks" or a block "type".
+  const hasBlockKitFallback =
+    text.includes("```") &&
+    /"blocks"\s*:|"type"\s*:\s*"(section|header|divider|context|actions|table|rich_text|image)"/.test(
+      text,
+    );
+  if (!hasOpenclawFence && !hasJsonFallback && !hasBlockKitFallback) {
     return { text };
   }
   let stripped = text;
@@ -230,6 +271,26 @@ function extractClawInteractive(text: string): {
       handleBody(body);
       logVerbose(`[claw-debug] fence: rescued json-fenced openclaw-interactive payload`);
       return "";
+    });
+  }
+  // CLAW-FORK 2026-06-21: lenient Block Kit rescue. ```json fence containing
+  // {"blocks":[...]} or a bare [block,...] array → validate as real Slack
+  // blocks, and only then consume + route. Random JSON code examples (not a
+  // blocks list) fail looksLikeSlackBlocks and are left untouched in text.
+  if (hasBlockKitFallback) {
+    stripped = stripped.replace(getJsonBlockKitFenceRe(), (match, body: string) => {
+      try {
+        const parsed = JSON.parse(body) as unknown;
+        const blocks = extractFenceBlocksFromBody(parsed);
+        if (!looksLikeSlackBlocks(blocks)) return match; // 코드 예시 등 — 그대로 둠
+        rawBlocks = rawBlocks.concat(blocks);
+        logVerbose(
+          `[claw-debug] fence: lenient-rescued plain json Block Kit (blocks=${blocks.length})`,
+        );
+        return "";
+      } catch {
+        return match;
+      }
     });
   }
   stripped = stripped.replace(/\n{3,}/g, "\n\n").trim();

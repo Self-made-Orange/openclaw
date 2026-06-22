@@ -5,5 +5,6 @@
  */
 export {
   getInteractiveFenceRe,
+  getJsonBlockKitFenceRe,
   getJsonInteractiveFenceRe,
 } from "../auto-reply/reply/interactive-fence-regex.js";

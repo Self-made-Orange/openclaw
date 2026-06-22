@@ -31,3 +31,18 @@ export function getInteractiveFenceRe(): RegExp {
 export function getJsonInteractiveFenceRe(): RegExp {
   return /```(?:json|jsonc|javascript|js)?\s*\n(\{[\s\S]*?"type"\s*:\s*"openclaw-interactive"[\s\S]*?\})\s*\n```\s*/gi;
 }
+
+/**
+ * CLAW-FORK 2026-06-21: lenient rescue. Agents repeatedly emit Slack Block Kit
+ * as a plain ```json fence (or untyped fence) containing either
+ *   { "blocks": [ ... ] }   or   [ {type:...}, {type:...} ]   (bare array)
+ * instead of the dedicated ```openclaw-interactive fence. The cron announce
+ * path then leaks raw JSON as code text (no render). This regex captures those
+ * two shapes so the parser can validate the body as real Slack blocks and
+ * convert. Validation (every element has a known Slack block `type`) happens in
+ * the parser to keep false positives low — a JSON code *example* that isn't a
+ * blocks list won't match the type check and is left as-is.
+ */
+export function getJsonBlockKitFenceRe(): RegExp {
+  return /```(?:json|jsonc|javascript|js)?\s*\n(\{\s*"blocks"\s*:\s*\[[\s\S]*?\]\s*\}|\[\s*\{[\s\S]*?\}\s*\])\s*\n```\s*/gi;
+}
