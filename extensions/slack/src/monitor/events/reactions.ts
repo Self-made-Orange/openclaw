@@ -28,6 +28,13 @@ const POSITIVE_EMOJI = new Set([
   "heart",
 ]);
 
+// CLAW-FORK 2026-06-29: negative emoji — 👎 silent logging fast-path.
+// positive 와 대칭. 그동안 👎 는 enqueueSystemEvent → §negative-record 스킬
+// (LLM)에 의존했는데 실제로 발동 안 해 negative.md 가 한 달+ 0건이었음.
+// 사용자가 👎 를 많이 달았는데도 손실 — 그래서 positive 처럼 코드로 즉시
+// auto_inferred 행을 append (0 latency + 0 토큰).
+const NEGATIVE_EMOJI = new Set(["-1", "thumbsdown"]);
+
 // CLAW-FORK: block sequence + char counts derivation for §positive entries.
 // Slack Block Kit block 을 SKILL.md §positive 가 기대하는 짧은 label 로 압축.
 // 알 수 없는 type 은 그대로 통과 (downstream 클러스터링이 처리).
@@ -140,6 +147,69 @@ async function fastLogPositiveReaction(params: {
   await fs.appendFile(positivePath, entry, "utf-8");
 }
 
+// CLAW-FORK 2026-06-29: 👎 fast-path — positive 와 대칭. SKILL §negative-record
+// 의 auto_inferred 행을 LLM 없이 즉시 기록. 같은 msg ts 가 이미 있으면 skip
+// (중복 방지, SKILL §negative-record point 1). signal 무손실 — 항상 land.
+async function fastLogNegativeReaction(params: {
+  channelLabel: string;
+  channelId?: string;
+  msgTs?: string;
+  reactor: string;
+  client?: SlackWebClient;
+}): Promise<void> {
+  const home = process.env.HOME;
+  if (!home) return;
+  const negativePath = path.resolve(home, "wiki/_format-feedback/negative.md");
+  let existing: string;
+  try {
+    existing = await fs.readFile(negativePath, "utf-8");
+  } catch {
+    return; // 파일 없으면 silent skip (vault 미셋업)
+  }
+  // 중복 방지: 같은 msg ts 행이 이미 있으면 skip.
+  if (params.msgTs && existing.includes(`msg ts: \`${params.msgTs}\``)) {
+    return;
+  }
+  const now = new Date();
+  const stamp =
+    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-` +
+    `${String(now.getDate()).padStart(2, "0")} ` +
+    `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+  let blockSequenceLine = "";
+  let charCountsLine = "";
+  if (params.client && params.channelId && params.msgTs) {
+    const message = await fetchBotMessageBlocks({
+      client: params.client,
+      channelId: params.channelId,
+      msgTs: params.msgTs,
+    });
+    if (message) {
+      const blocks = Array.isArray(message.blocks) ? message.blocks : [];
+      if (blocks.length > 0) {
+        const sequence = blocks.map((b) => summarizeBlockSig(b)).join(" → ");
+        blockSequenceLine = `- block sequence: \`${sequence}\`\n`;
+      }
+      const textLen = (message.text ?? "").length;
+      const blocksTextLen = blocks.reduce((acc, b) => acc + extractBlockText(b).length, 0);
+      if (textLen > 0 || blocksTextLen > 0) {
+        charCountsLine = `- char counts: text=${textLen}, blocks_text=${blocksTextLen}\n`;
+      }
+    }
+  }
+
+  const entry =
+    `\n## ${stamp} | quick-log | reactor: ${params.reactor} | status: auto_inferred\n` +
+    `- channel: \`${params.channelId ?? params.channelLabel}\`\n` +
+    `- msg ts: \`${params.msgTs ?? ""}\`\n` +
+    `${blockSequenceLine}${charCountsLine}` +
+    `- inferred signal: 👎 — 이 형태 보완 필요 (코드 fast-path 자동 기록)\n` +
+    `- thread ask ts: (생략 — fast-path)\n` +
+    `- user feedback: (없음 — auto_inferred)\n` +
+    `- improvement direction: (추론 — synth 시 클러스터링)\n`;
+  await fs.appendFile(negativePath, entry, "utf-8");
+}
+
 function shouldEmitSlackReactionNotification(params: {
   ctx: SlackMonitorContext;
   event: SlackReactionEvent;
@@ -232,6 +302,30 @@ export function registerSlackReactionEvents(params: {
           }
         }
         // :+1: 토글 취소 (removed): 아무것도 안 함 (이미 silent-logged 된 entry 도 그대로).
+        return;
+      }
+
+      // CLAW-FORK 2026-06-29: 👎 fast-path — positive 와 대칭. 즉시 negative.md
+      // 에 auto_inferred 행 append (LLM/스킬 의존 X). removed 는 무시.
+      if (isOwnMessage && NEGATIVE_EMOJI.has(fastEmojiLabel)) {
+        if (action === "added") {
+          try {
+            await fastLogNegativeReaction({
+              channelLabel: ingressContext.channelLabel,
+              channelId: item.channel,
+              msgTs: item.ts,
+              reactor: actorInfo?.name ?? event.user ?? "unknown",
+              client: ctx.app.client,
+            });
+            ctx.runtime.log?.(
+              `[claw-debug] reaction :-1: silent-logged (no wake): channel=${item.channel} msg=${item.ts}`,
+            );
+          } catch (err) {
+            ctx.runtime.error?.(
+              danger(`fast-path negative log failed: ${formatErrorMessage(err)}`),
+            );
+          }
+        }
         return;
       }
 

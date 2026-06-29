@@ -19,6 +19,7 @@ import {
   getJsonBlockKitFenceRe,
   getJsonInteractiveFenceRe,
 } from "./interactive-fence-regex.js";
+import { convertMarkdownTables } from "./markdown-table.js";
 import { parseReplyDirectives } from "./reply-directives.js";
 import { applyReplyTagsToPayload, isRenderablePayload } from "./reply-payloads.js";
 import type { TypingSignaler } from "./typing-mode.js";
@@ -330,6 +331,15 @@ function extractClawInteractive(text: string): {
       logVerbose(`[claw-debug] fence: rescued angle-bracket Block Kit (blocks=${blocks.length})`);
       return "";
     });
+  }
+  // CLAW-FORK 2026-06-29: markdown 표(코드펜스/bare) → Slack table 블록.
+  if (stripped.includes("|")) {
+    const conv = convertMarkdownTables(stripped);
+    if (conv.blocks.length > 0) {
+      rawBlocks = rawBlocks.concat(conv.blocks);
+      stripped = conv.text;
+      logVerbose(`[claw-debug] markdown-table → Slack table block (n=${conv.blocks.length})`);
+    }
   }
   stripped = stripped.replace(/\n{3,}/g, "\n\n").trim();
   // CLAW-FORK: if the ONLY content was a malformed fence (parse failed, no blocks
